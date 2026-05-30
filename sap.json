@@ -1,0 +1,30 @@
+{
+  "schema": "sa.plugin/1",
+  "name": "http-server",
+  "version": "0.1.0",
+  "source": {
+    "type": "local",
+    "path": "."
+  },
+  "abi": {
+    "plugin": 1,
+    "saasm": ">=0.4.0"
+  },
+  "artifacts": {
+    "linux-x86_64": {
+      "path": "zig-out/lib/libhttp-server.so"
+    }
+  },
+  "interfaces": {},
+  "skills": ["http.server"],
+  "permissions": {
+    "fs": [],
+    "net": [
+      { "url": "http://localhost", "methods": ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
+      { "url": "http://127.0.0.1", "methods": ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] }
+    ],
+    "env": [],
+    "process": { "spawn": false, "exec": [] }
+  },
+  "dependencies": {}
+}

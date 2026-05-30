@@ -1,6 +1,25 @@
 const std = @import("std");
 const plugin_api = @import("plugin_api");
 
+var sigpipe_once = std.once(installSigpipeHandler);
+
+fn noopSigpipe(_: i32) callconv(.c) void {}
+
+fn installSigpipeHandler() void {
+    if (comptime @hasDecl(std.posix.SIG, "PIPE")) {
+        const act: std.posix.Sigaction = .{
+            .handler = .{ .handler = noopSigpipe },
+            .mask = std.posix.empty_sigset,
+            .flags = 0,
+        };
+        std.posix.sigaction(std.posix.SIG.PIPE, &act, null);
+    }
+}
+
+fn ensureProcessSignalSafety() void {
+    sigpipe_once.call();
+}
+
 pub const SaHttpServerHandle = extern struct {
     impl: ?*anyopaque,
 };
@@ -53,6 +72,9 @@ pub const HttpServer = struct {
         const request = try self.allocator.create(HttpRequest);
         errdefer self.allocator.destroy(request);
 
+        const method = try methodStringAlloc(self.allocator, std_request.head.method);
+        errdefer self.allocator.free(method);
+
         const target = try self.allocator.dupe(u8, std_request.head.target);
         errdefer self.allocator.free(target);
 
@@ -74,6 +96,7 @@ pub const HttpServer = struct {
         request.* = .{
             .allocator = self.allocator,
             .connection = accepted,
+            .method = method,
             .target = target,
             .headers = try headers.toOwnedSlice(),
             .body = try body.toOwnedSlice(),
@@ -90,6 +113,7 @@ pub const HttpServer = struct {
 pub const HttpRequest = struct {
     allocator: std.mem.Allocator,
     connection: std.net.Server.Connection,
+    method: []u8,
     target: []u8,
     headers: []Header,
     body: []u8,
@@ -101,6 +125,7 @@ pub const HttpRequest = struct {
             self.allocator.free(header.value);
         }
         self.allocator.free(self.headers);
+        self.allocator.free(self.method);
         self.allocator.free(self.target);
         if (self.body.len != 0) self.allocator.free(self.body);
         self.allocator.destroy(self);
@@ -111,6 +136,7 @@ pub const HttpResponse = struct {
     allocator: std.mem.Allocator,
     request: *HttpRequest,
     status: u16,
+    content_type: []const u8 = "text/plain",
     sent: bool = false,
 
     fn deinit(self: *HttpResponse) void {
@@ -192,7 +218,15 @@ fn findHeader(request: *HttpRequest, name: []const u8) ?[]const u8 {
     return null;
 }
 
+fn methodStringAlloc(allocator: std.mem.Allocator, method: std.http.Method) ![]u8 {
+    var buf: [24]u8 = undefined;
+    var stream = std.io.fixedBufferStream(&buf);
+    try method.write(stream.writer());
+    return allocator.dupe(u8, stream.getWritten());
+}
+
 pub export fn sa_http_server_new(out_server: ?*?*anyopaque) u32 {
+    ensureProcessSignalSafety();
     const slot = out_server orelse return @intFromEnum(plugin_api.AbiStatus.failed);
     const server = HttpServer.init(std.heap.page_allocator) catch return @intFromEnum(plugin_api.AbiStatus.failed);
     slot.* = @ptrCast(server);
@@ -213,6 +247,16 @@ pub export fn sa_http_server_accept(server: ?*anyopaque, out_req: ?*?*anyopaque)
     const srv = @as(*HttpServer, @ptrCast(@alignCast(server_ptr)));
     const request = srv.accept() catch return @intFromEnum(plugin_api.AbiStatus.failed);
     slot.* = @ptrCast(request);
+    return @intFromEnum(plugin_api.AbiStatus.ok);
+}
+
+pub export fn sa_http_server_req_get_method(req: ?*anyopaque, out_method_ptr: ?*?[*]const u8, out_len: ?*u64) u32 {
+    const req_ptr = req orelse return @intFromEnum(plugin_api.AbiStatus.failed);
+    const method_slot = out_method_ptr orelse return @intFromEnum(plugin_api.AbiStatus.failed);
+    const len_slot = out_len orelse return @intFromEnum(plugin_api.AbiStatus.failed);
+    const request = @as(*HttpRequest, @ptrCast(@alignCast(req_ptr)));
+    method_slot.* = request.method.ptr;
+    len_slot.* = request.method.len;
     return @intFromEnum(plugin_api.AbiStatus.ok);
 }
 
@@ -267,11 +311,12 @@ pub export fn sa_http_server_resp_new(req: ?*anyopaque, status: u16, out_resp: ?
     const slot = out_resp orelse return @intFromEnum(plugin_api.AbiStatus.failed);
     const request = @as(*HttpRequest, @ptrCast(@alignCast(req_ptr)));
     const response = request.allocator.create(HttpResponse) catch return @intFromEnum(plugin_api.AbiStatus.failed);
-    response.* = .{
-        .allocator = request.allocator,
-        .request = request,
-        .status = status,
-    };
+        response.* = .{
+            .allocator = request.allocator,
+            .request = request,
+            .status = status,
+            .content_type = "text/plain",
+        };
     slot.* = @ptrCast(response);
     return @intFromEnum(plugin_api.AbiStatus.ok);
 }
@@ -286,12 +331,21 @@ pub export fn sa_http_server_resp_send(resp: ?*anyopaque, body_ptr: ?[*]const u8
     const conn = &response.request.connection;
     var header_buf: [256]u8 = undefined;
     const header = std.fmt.bufPrint(&header_buf,
-        "HTTP/1.1 {d} {s}\r\ncontent-length: {d}\r\ncontent-type: text/plain\r\nconnection: close\r\n\r\n",
-        .{ response.status, statusText(response.status), payload.len },
+        "HTTP/1.1 {d} {s}\r\ncontent-length: {d}\r\ncontent-type: {s}\r\nconnection: close\r\n\r\n",
+        .{ response.status, statusText(response.status), payload.len, response.content_type },
     ) catch return @intFromEnum(plugin_api.AbiStatus.failed);
     conn.stream.writeAll(header) catch return @intFromEnum(plugin_api.AbiStatus.failed);
     conn.stream.writeAll(payload) catch return @intFromEnum(plugin_api.AbiStatus.failed);
     response.sent = true;
+    return @intFromEnum(plugin_api.AbiStatus.ok);
+}
+
+pub export fn sa_http_server_resp_set_content_type(resp: ?*anyopaque, content_type_ptr: ?[*]const u8, content_type_len: u64) u32 {
+    const resp_ptr = resp orelse return @intFromEnum(plugin_api.AbiStatus.failed);
+    const content_type = content_type_ptr orelse return @intFromEnum(plugin_api.AbiStatus.failed);
+    const response = @as(*HttpResponse, @ptrCast(@alignCast(resp_ptr)));
+    if (response.sent) return @intFromEnum(plugin_api.AbiStatus.failed);
+    response.content_type = content_type[0..@intCast(content_type_len)];
     return @intFromEnum(plugin_api.AbiStatus.ok);
 }
 

@@ -111,6 +111,126 @@ test "http server plugin exports runtime descriptor and scaffold entry" {
     , iface);
 }
 
+test "http server runtime installs SIGPIPE handler for broken SSE sockets" {
+    if (!@hasDecl(std.posix.SIG, "PIPE")) return error.SkipZigTest;
+
+    const default_act: std.posix.Sigaction = .{
+        .handler = .{ .handler = std.posix.SIG.DFL },
+        .mask = std.posix.empty_sigset,
+        .flags = 0,
+    };
+    std.posix.sigaction(std.posix.SIG.PIPE, &default_act, null);
+
+    var server: ?*anyopaque = null;
+    try std.testing.expectEqual(@as(u32, 0), plugin.sa_http_server_new(&server));
+    defer _ = plugin.sa_http_server_free(server);
+
+    var installed: std.posix.Sigaction = undefined;
+    std.posix.sigaction(std.posix.SIG.PIPE, null, &installed);
+    try std.testing.expect(installed.handler.handler != std.posix.SIG.DFL);
+}
+
+test "http server saasm api exposes request method" {
+    const port: u16 = 18082;
+    var server: ?*anyopaque = null;
+    try std.testing.expectEqual(@as(u32, 0), plugin.sa_http_server_new(&server));
+    defer _ = plugin.sa_http_server_free(server);
+
+    const host = "127.0.0.1";
+    try std.testing.expectEqual(@as(u32, 0), plugin.sa_http_server_start(server, host.ptr, host.len, port));
+
+    const client_thread = try std.Thread.spawn(.{}, struct {
+        fn run() !void {
+            var stream = blk: {
+                var attempt: usize = 0;
+                while (attempt < 50) : (attempt += 1) {
+                    const connected = std.net.tcpConnectToHost(std.testing.allocator, "127.0.0.1", 18082) catch |err| switch (err) {
+                        error.ConnectionRefused => {
+                            std.time.sleep(20 * std.time.ns_per_ms);
+                            continue;
+                        },
+                        else => return err,
+                    };
+                    break :blk connected;
+                }
+                return error.ConnectionRefused;
+            };
+            defer stream.close();
+            try stream.writeAll("POST /method HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+            var response_buf: [128]u8 = undefined;
+            _ = try stream.read(&response_buf);
+        }
+    }.run, .{});
+
+    var req: ?*anyopaque = null;
+    try std.testing.expectEqual(@as(u32, 0), plugin.sa_http_server_accept(server, &req));
+    defer _ = plugin.sa_http_server_req_free(req);
+
+    var method_ptr: ?[*]const u8 = null;
+    var method_len: u64 = 0;
+    try std.testing.expectEqual(@as(u32, 0), plugin.sa_http_server_req_get_method(req, &method_ptr, &method_len));
+    try std.testing.expectEqualStrings("POST", (method_ptr orelse return error.NullMethod)[0..@intCast(method_len)]);
+
+    var resp: ?*anyopaque = null;
+    const body = "ok";
+    try std.testing.expectEqual(@as(u32, 0), plugin.sa_http_server_resp_new(req, 200, &resp));
+    try std.testing.expectEqual(@as(u32, 0), plugin.sa_http_server_resp_send(resp, body.ptr, body.len));
+    _ = plugin.sa_http_server_resp_free(resp);
+
+    client_thread.join();
+}
+
+test "http server saasm api can send typed plain response" {
+    const port: u16 = 18083;
+    var server: ?*anyopaque = null;
+    try std.testing.expectEqual(@as(u32, 0), plugin.sa_http_server_new(&server));
+    defer _ = plugin.sa_http_server_free(server);
+
+    const host = "127.0.0.1";
+    try std.testing.expectEqual(@as(u32, 0), plugin.sa_http_server_start(server, host.ptr, host.len, port));
+
+    const client_thread = try std.Thread.spawn(.{}, struct {
+        fn run() !void {
+            var stream = blk: {
+                var attempt: usize = 0;
+                while (attempt < 50) : (attempt += 1) {
+                    const connected = std.net.tcpConnectToHost(std.testing.allocator, "127.0.0.1", 18083) catch |err| switch (err) {
+                        error.ConnectionRefused => {
+                            std.time.sleep(20 * std.time.ns_per_ms);
+                            continue;
+                        },
+                        else => return err,
+                    };
+                    break :blk connected;
+                }
+                return error.ConnectionRefused;
+            };
+            defer stream.close();
+            try stream.writeAll("GET /typed HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n");
+            var response_buf: [512]u8 = undefined;
+            const n = try stream.read(&response_buf);
+            const response = response_buf[0..n];
+            try std.testing.expect(std.mem.indexOf(u8, response, "HTTP/1.1 418") != null);
+            try std.testing.expect(std.mem.indexOf(u8, response, "content-type: application/json") != null);
+            try std.testing.expect(std.mem.endsWith(u8, response, "{}"));
+        }
+    }.run, .{});
+
+    var req: ?*anyopaque = null;
+    try std.testing.expectEqual(@as(u32, 0), plugin.sa_http_server_accept(server, &req));
+    defer _ = plugin.sa_http_server_req_free(req);
+
+    var resp: ?*anyopaque = null;
+    const body = "{}";
+    const content_type = "application/json";
+    try std.testing.expectEqual(@as(u32, 0), plugin.sa_http_server_resp_new(req, 418, &resp));
+    try std.testing.expectEqual(@as(u32, 0), plugin.sa_http_server_resp_set_content_type(resp, content_type.ptr, content_type.len));
+    try std.testing.expectEqual(@as(u32, 0), plugin.sa_http_server_resp_send(resp, body.ptr, body.len));
+    _ = plugin.sa_http_server_resp_free(resp);
+
+    client_thread.join();
+}
+
 test "http server plugin serve responds on a local loopback socket" {
     var stdout_buf = std.ArrayList(u8).init(std.testing.allocator);
     defer stdout_buf.deinit();
