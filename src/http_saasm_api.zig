@@ -41,6 +41,15 @@ const Header = struct {
     value: []u8,
 };
 
+const WebSocketOpcode = enum(u8) {
+    continuation = 0,
+    text = 1,
+    binary = 2,
+    connection_close = 8,
+    ping = 9,
+    pong = 10,
+};
+
 pub const HttpServer = struct {
     allocator: std.mem.Allocator,
     server: ?std.net.Server = null,
@@ -118,8 +127,7 @@ pub const HttpRequest = struct {
     headers: []Header,
     body: []u8,
 
-    fn deinit(self: *HttpRequest) void {
-        self.connection.stream.close();
+    fn freeResources(self: *HttpRequest) void {
         for (self.headers) |header| {
             self.allocator.free(header.name);
             self.allocator.free(header.value);
@@ -128,6 +136,11 @@ pub const HttpRequest = struct {
         self.allocator.free(self.method);
         self.allocator.free(self.target);
         if (self.body.len != 0) self.allocator.free(self.body);
+    }
+
+    fn deinit(self: *HttpRequest) void {
+        self.connection.stream.close();
+        self.freeResources();
         self.allocator.destroy(self);
     }
 };
@@ -198,6 +211,27 @@ pub const HttpStreamResponse = struct {
     }
 };
 
+pub const WebSocketHandle = struct {
+    allocator: std.mem.Allocator,
+    stream: std.net.Stream,
+    last_message: ?[]u8 = null,
+
+    fn initFromRequest(request: *HttpRequest) !*WebSocketHandle {
+        const self = try request.allocator.create(WebSocketHandle);
+        self.* = .{
+            .allocator = request.allocator,
+            .stream = request.connection.stream,
+        };
+        return self;
+    }
+
+    fn deinit(self: *WebSocketHandle) void {
+        if (self.last_message) |message| self.allocator.free(message);
+        self.stream.close();
+        self.allocator.destroy(self);
+    }
+};
+
 fn statusText(status: u16) []const u8 {
     return switch (status) {
         200 => "OK",
@@ -216,6 +250,138 @@ fn findHeader(request: *HttpRequest, name: []const u8) ?[]const u8 {
         if (std.ascii.eqlIgnoreCase(header.name, name)) return header.value;
     }
     return null;
+}
+
+fn headerContainsToken(value: []const u8, token: []const u8) bool {
+    var it = std.mem.tokenizeAny(u8, value, " \t,");
+    while (it.next()) |part| {
+        if (std.ascii.eqlIgnoreCase(part, token)) return true;
+    }
+    return false;
+}
+
+fn computeWebSocketAccept(key: []const u8, out: *[28]u8) []const u8 {
+    var sha1 = std.crypto.hash.Sha1.init(.{});
+    sha1.update(key);
+    sha1.update("258EAFA5-E914-47DA-95CA-C5AB0DC85B11");
+    var digest: [std.crypto.hash.Sha1.digest_length]u8 = undefined;
+    sha1.final(&digest);
+    return std.base64.standard.Encoder.encode(out, &digest);
+}
+
+fn maskInPlace(bytes: []u8, mask: [4]u8) void {
+    for (bytes, 0..) |*byte, index| {
+        byte.* ^= mask[index & 3];
+    }
+}
+
+fn readExact(stream: std.net.Stream, buffer: []u8) bool {
+    var index: usize = 0;
+    while (index < buffer.len) {
+        const read_n = stream.read(buffer[index..]) catch return false;
+        if (read_n == 0) return false;
+        index += read_n;
+    }
+    return true;
+}
+
+fn writeExact(stream: std.net.Stream, bytes: []const u8) bool {
+    stream.writeAll(bytes) catch return false;
+    return true;
+}
+
+fn writeFrame(stream: std.net.Stream, opcode: u8, payload: []const u8) bool {
+    var header: [10]u8 = undefined;
+    header[0] = 0x80 | (opcode & 0x0f);
+    var header_len: usize = 2;
+    if (payload.len <= 125) {
+        header[1] = @intCast(payload.len);
+    } else if (payload.len <= 0xffff) {
+        header[1] = 126;
+        std.mem.writeInt(u16, header[2..4], @as(u16, @intCast(payload.len)), .big);
+        header_len = 4;
+    } else {
+        header[1] = 127;
+        std.mem.writeInt(u64, header[2..10], @as(u64, payload.len), .big);
+        header_len = 10;
+    }
+    if (!writeExact(stream, header[0..header_len])) return false;
+    if (payload.len > 0) return writeExact(stream, payload);
+    return true;
+}
+
+fn readFrame(handle: *WebSocketHandle, max_len: u64, out_opcode: ?*u8, out_ptr: ?*?[*]const u8, out_len: ?*u64) u32 {
+    const opcode_slot = out_opcode orelse return 2;
+    const ptr_slot = out_ptr orelse return 2;
+    const len_slot = out_len orelse return 2;
+
+    while (true) {
+        var header: [2]u8 = undefined;
+        if (!readExact(handle.stream, &header)) return 2;
+        const fin = (header[0] & 0x80) != 0;
+        const opcode = header[0] & 0x0f;
+        const masked = (header[1] & 0x80) != 0;
+        if (!fin or !masked) return 2;
+
+        var payload_len: u64 = header[1] & 0x7f;
+        if (payload_len == 126) {
+            var extended: [2]u8 = undefined;
+            if (!readExact(handle.stream, &extended)) return 2;
+            payload_len = std.mem.readInt(u16, &extended, .big);
+        } else if (payload_len == 127) {
+            var extended: [8]u8 = undefined;
+            if (!readExact(handle.stream, &extended)) return 2;
+            payload_len = std.mem.readInt(u64, &extended, .big);
+        }
+        if (payload_len > max_len or payload_len > std.math.maxInt(usize)) return 2;
+
+        var mask_key: [4]u8 = undefined;
+        if (!readExact(handle.stream, &mask_key)) return 2;
+
+        var payload: []u8 = &.{};
+        if (payload_len > 0) {
+            if (handle.last_message) |message| handle.allocator.free(message);
+            handle.last_message = null;
+            payload = handle.allocator.alloc(u8, @intCast(payload_len)) catch return 2;
+            errdefer handle.allocator.free(payload);
+            if (!readExact(handle.stream, payload)) return 2;
+            maskInPlace(payload, mask_key);
+        }
+
+        switch (opcode) {
+            @intFromEnum(WebSocketOpcode.ping) => {
+                if (!writeFrame(handle.stream, @intFromEnum(WebSocketOpcode.pong), payload)) {
+                    if (payload.len > 0) handle.allocator.free(payload);
+                    return 2;
+                }
+                if (payload.len > 0) handle.allocator.free(payload);
+                continue;
+            },
+            @intFromEnum(WebSocketOpcode.pong) => {
+                if (payload.len > 0) handle.allocator.free(payload);
+                continue;
+            },
+            @intFromEnum(WebSocketOpcode.connection_close), @intFromEnum(WebSocketOpcode.text), @intFromEnum(WebSocketOpcode.binary) => {
+                opcode_slot.* = opcode;
+                if (payload.len == 0) {
+                    if (handle.last_message) |message| handle.allocator.free(message);
+                    handle.last_message = null;
+                    ptr_slot.* = null;
+                    len_slot.* = 0;
+                } else {
+                    if (handle.last_message) |message| handle.allocator.free(message);
+                    handle.last_message = payload;
+                    ptr_slot.* = payload.ptr;
+                    len_slot.* = payload.len;
+                }
+                return 0;
+            },
+            else => {
+                if (payload.len > 0) handle.allocator.free(payload);
+                return 2;
+            },
+        }
+    }
 }
 
 fn methodStringAlloc(allocator: std.mem.Allocator, method: std.http.Method) ![]u8 {
@@ -402,5 +568,55 @@ pub export fn sa_http_server_free(server: ?*anyopaque) u32 {
     const server_ptr = server orelse return @intFromEnum(plugin_api.AbiStatus.failed);
     const srv = @as(*HttpServer, @ptrCast(@alignCast(server_ptr)));
     srv.deinit();
+    return @intFromEnum(plugin_api.AbiStatus.ok);
+}
+
+pub export fn sa_http_server_websocket_upgrade(req: ?*anyopaque, out_ws: ?*?*anyopaque) u32 {
+    const req_ptr = req orelse return @intFromEnum(plugin_api.AbiStatus.failed);
+    const slot = out_ws orelse return @intFromEnum(plugin_api.AbiStatus.failed);
+    const request = @as(*HttpRequest, @ptrCast(@alignCast(req_ptr)));
+
+    const upgrade = findHeader(request, "upgrade") orelse return @intFromEnum(plugin_api.AbiStatus.failed);
+    if (!std.ascii.eqlIgnoreCase(upgrade, "websocket")) return @intFromEnum(plugin_api.AbiStatus.failed);
+    const connection = findHeader(request, "connection") orelse return @intFromEnum(plugin_api.AbiStatus.failed);
+    if (!headerContainsToken(connection, "upgrade")) return @intFromEnum(plugin_api.AbiStatus.failed);
+    const key = findHeader(request, "sec-websocket-key") orelse return @intFromEnum(plugin_api.AbiStatus.failed);
+
+    var accept_buf: [28]u8 = undefined;
+    const accept = computeWebSocketAccept(key, &accept_buf);
+
+    var header_buf: [256]u8 = undefined;
+    const response = std.fmt.bufPrint(
+        &header_buf,
+        "HTTP/1.1 101 Switching Protocols\r\nupgrade: websocket\r\nconnection: Upgrade\r\nsec-websocket-accept: {s}\r\n\r\n",
+        .{accept},
+    ) catch return @intFromEnum(plugin_api.AbiStatus.failed);
+    request.connection.stream.writeAll(response) catch return @intFromEnum(plugin_api.AbiStatus.failed);
+
+    const handle = WebSocketHandle.initFromRequest(request) catch return @intFromEnum(plugin_api.AbiStatus.failed);
+    slot.* = @ptrCast(handle);
+    request.freeResources();
+    request.allocator.destroy(request);
+    return @intFromEnum(plugin_api.AbiStatus.ok);
+}
+
+pub export fn sa_http_server_websocket_read(ws: ?*anyopaque, max_len: u64, out_opcode: ?*u8, out_ptr: ?*?[*]const u8, out_len: ?*u64) u32 {
+    const ws_ptr = ws orelse return @intFromEnum(plugin_api.AbiStatus.failed);
+    const handle = @as(*WebSocketHandle, @ptrCast(@alignCast(ws_ptr)));
+    return readFrame(handle, max_len, out_opcode, out_ptr, out_len);
+}
+
+pub export fn sa_http_server_websocket_write(ws: ?*anyopaque, opcode: u8, data_ptr: ?[*]const u8, data_len: u64) u32 {
+    const ws_ptr = ws orelse return @intFromEnum(plugin_api.AbiStatus.failed);
+    const handle = @as(*WebSocketHandle, @ptrCast(@alignCast(ws_ptr)));
+    const payload = if (data_ptr) |ptr| ptr[0..@intCast(data_len)] else &[_]u8{};
+    if (!writeFrame(handle.stream, opcode, payload)) return @intFromEnum(plugin_api.AbiStatus.failed);
+    return @intFromEnum(plugin_api.AbiStatus.ok);
+}
+
+pub export fn sa_http_server_websocket_free(ws: ?*anyopaque) u32 {
+    const ws_ptr = ws orelse return @intFromEnum(plugin_api.AbiStatus.failed);
+    const handle = @as(*WebSocketHandle, @ptrCast(@alignCast(ws_ptr)));
+    handle.deinit();
     return @intFromEnum(plugin_api.AbiStatus.ok);
 }

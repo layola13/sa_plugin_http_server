@@ -15,15 +15,19 @@
       "path": "zig-out/lib/libhttp-server.so"
     }
   },
-  "interfaces": {},
+  "interfaces": {
+    "sai": { "path": "sa_http_server.sai" }
+  },
   "skills": ["http.server"],
   "permissions": {
-    "fs": [],
+    "fs": [
+      { "op": "metadata", "path": "$SA_PLUGINS_HOME/**" }
+    ],
     "net": [
       { "url": "http://localhost", "methods": ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
       { "url": "http://127.0.0.1", "methods": ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] }
     ],
-    "env": [],
+    "env": ["HOME", "TMPDIR", "TMP", "TEMP", "SA_*"],
     "process": { "spawn": false, "exec": [] }
   },
   "dependencies": {}
