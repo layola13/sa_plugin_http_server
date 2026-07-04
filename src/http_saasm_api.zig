@@ -1,6 +1,7 @@
 const std = @import("std");
 const plugin_api = @import("plugin_api");
 const core = @import("vite_api.zig");
+const sa_std_net = @import("sa_std_net.zig");
 
 const ensureProcessSignalSafety = core.ensureProcessSignalSafety;
 pub const HttpServer = core.HttpServer;
@@ -10,7 +11,6 @@ pub const HttpStreamResponse = core.HttpStreamResponse;
 pub const WebSocketHandle = core.WebSocketHandle;
 const findHeader = core.findHeader;
 const headerContainsToken = core.headerContainsToken;
-const computeWebSocketAccept = core.computeWebSocketAccept;
 const readFrame = core.readFrame;
 const writeFrame = core.writeFrame;
 
@@ -204,7 +204,7 @@ pub export fn sa_http_server_websocket_upgrade(req: ?*anyopaque, out_ws: ?*?*any
     const key = findHeader(request, "sec-websocket-key") orelse return @intFromEnum(plugin_api.AbiStatus.failed);
 
     var accept_buf: [28]u8 = undefined;
-    const accept = computeWebSocketAccept(key, &accept_buf);
+    const accept = sa_std_net.websocketAccept(key, &accept_buf) catch return @intFromEnum(plugin_api.AbiStatus.failed);
 
     var header_buf: [256]u8 = undefined;
     const response = std.fmt.bufPrint(

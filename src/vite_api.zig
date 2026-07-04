@@ -1,4 +1,5 @@
 const std = @import("std");
+const sa_std_net = @import("sa_std_net.zig");
 
 var sigpipe_once = std.once(installSigpipeHandler);
 
@@ -286,54 +287,17 @@ pub fn headerContainsToken(value: []const u8, token: []const u8) bool {
     return false;
 }
 
-pub fn computeWebSocketAccept(key: []const u8, out: *[28]u8) []const u8 {
-    var sha1 = std.crypto.hash.Sha1.init(.{});
-    sha1.update(key);
-    sha1.update("258EAFA5-E914-47DA-95CA-C5AB0DC85B11");
-    var digest: [std.crypto.hash.Sha1.digest_length]u8 = undefined;
-    sha1.final(&digest);
-    return std.base64.standard.Encoder.encode(out, &digest);
-}
-
-fn maskInPlace(bytes: []u8, mask: [4]u8) void {
-    for (bytes, 0..) |*byte, index| {
-        byte.* ^= mask[index & 3];
-    }
-}
-
-fn readExact(stream: std.net.Stream, buffer: []u8) bool {
-    var index: usize = 0;
-    while (index < buffer.len) {
-        const read_n = stream.read(buffer[index..]) catch return false;
-        if (read_n == 0) return false;
-        index += read_n;
-    }
-    return true;
-}
-
 fn writeExact(stream: std.net.Stream, bytes: []const u8) bool {
     stream.writeAll(bytes) catch return false;
     return true;
 }
 
 pub fn writeFrame(stream: std.net.Stream, opcode: u8, payload: []const u8) bool {
-    var header: [10]u8 = undefined;
-    header[0] = 0x80 | (opcode & 0x0f);
-    var header_len: usize = 2;
-    if (payload.len <= 125) {
-        header[1] = @intCast(payload.len);
-    } else if (payload.len <= 0xffff) {
-        header[1] = 126;
-        std.mem.writeInt(u16, header[2..4], @as(u16, @intCast(payload.len)), .big);
-        header_len = 4;
-    } else {
-        header[1] = 127;
-        std.mem.writeInt(u64, header[2..10], @as(u64, payload.len), .big);
-        header_len = 10;
-    }
-    if (!writeExact(stream, header[0..header_len])) return false;
-    if (payload.len > 0) return writeExact(stream, payload);
-    return true;
+    const frame_cap = std.math.add(usize, payload.len, 14) catch return false;
+    const frame = std.heap.page_allocator.alloc(u8, frame_cap) catch return false;
+    defer std.heap.page_allocator.free(frame);
+    const frame_len = sa_std_net.buildWebSocketFrame(frame, opcode, payload, null) catch return false;
+    return writeExact(stream, frame[0..frame_len]);
 }
 
 pub fn readFrame(handle: *WebSocketHandle, max_len: u64, out_opcode: ?*u8, out_ptr: ?*?[*]const u8, out_len: ?*u64) u32 {
@@ -342,36 +306,12 @@ pub fn readFrame(handle: *WebSocketHandle, max_len: u64, out_opcode: ?*u8, out_p
     const len_slot = out_len orelse return 2;
 
     while (true) {
-        var header: [2]u8 = undefined;
-        if (!readExact(handle.stream, &header)) return 2;
-        const fin = (header[0] & 0x80) != 0;
-        const opcode = header[0] & 0x0f;
-        const masked = (header[1] & 0x80) != 0;
-        if (!fin or !masked) return 2;
-
-        var payload_len: u64 = header[1] & 0x7f;
-        if (payload_len == 126) {
-            var extended: [2]u8 = undefined;
-            if (!readExact(handle.stream, &extended)) return 2;
-            payload_len = std.mem.readInt(u16, &extended, .big);
-        } else if (payload_len == 127) {
-            var extended: [8]u8 = undefined;
-            if (!readExact(handle.stream, &extended)) return 2;
-            payload_len = std.mem.readInt(u64, &extended, .big);
-        }
-        if (payload_len > max_len or payload_len > std.math.maxInt(usize)) return 2;
-
-        var mask_key: [4]u8 = undefined;
-        if (!readExact(handle.stream, &mask_key)) return 2;
-
-        var payload: []u8 = &.{};
-        if (payload_len > 0) {
+        const frame = sa_std_net.readWebSocketFrameAlloc(handle.allocator, handle.stream, max_len, true) catch return 2;
+        const opcode = frame.opcode;
+        const payload = frame.payload;
+        if (payload.len > 0) {
             if (handle.last_message) |message| handle.allocator.free(message);
             handle.last_message = null;
-            payload = handle.allocator.alloc(u8, @intCast(payload_len)) catch return 2;
-            errdefer handle.allocator.free(payload);
-            if (!readExact(handle.stream, payload)) return 2;
-            maskInPlace(payload, mask_key);
         }
 
         switch (opcode) {
