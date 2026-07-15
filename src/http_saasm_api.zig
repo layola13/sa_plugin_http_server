@@ -122,9 +122,12 @@ pub export fn sa_http_server_resp_new(req: ?*anyopaque, status: u16, out_resp: ?
 
 pub export fn sa_http_server_resp_send(resp: ?*anyopaque, body_ptr: ?[*]const u8, body_len: u64) u32 {
     const resp_ptr = resp orelse return @intFromEnum(plugin_api.AbiStatus.failed);
-    const body = body_ptr orelse return @intFromEnum(plugin_api.AbiStatus.failed);
+    const body = if (body_ptr) |body| body[0..@intCast(body_len)] else blk: {
+        if (body_len != 0) return @intFromEnum(plugin_api.AbiStatus.failed);
+        break :blk "";
+    };
     const response = @as(*HttpResponse, @ptrCast(@alignCast(resp_ptr)));
-    response.send(body[0..@intCast(body_len)]) catch return @intFromEnum(plugin_api.AbiStatus.failed);
+    response.send(body) catch return @intFromEnum(plugin_api.AbiStatus.failed);
     return @intFromEnum(plugin_api.AbiStatus.ok);
 }
 
@@ -154,10 +157,13 @@ pub export fn sa_http_server_resp_stream_new(req: ?*anyopaque, status: u16, out_
 
 pub export fn sa_http_server_resp_stream_write(resp: ?*anyopaque, body_ptr: ?[*]const u8, body_len: u64) u32 {
     const resp_ptr = resp orelse return @intFromEnum(plugin_api.AbiStatus.failed);
-    const body = body_ptr orelse return @intFromEnum(plugin_api.AbiStatus.failed);
+    const body = if (body_ptr) |body| body[0..@intCast(body_len)] else blk: {
+        if (body_len != 0) return @intFromEnum(plugin_api.AbiStatus.failed);
+        break :blk "";
+    };
     const response = @as(*HttpStreamResponse, @ptrCast(@alignCast(resp_ptr)));
     if (response.ended) return @intFromEnum(plugin_api.AbiStatus.failed);
-    response.writeChunk(body[0..@intCast(body_len)]) catch return @intFromEnum(plugin_api.AbiStatus.failed);
+    response.writeChunk(body) catch return @intFromEnum(plugin_api.AbiStatus.failed);
     return @intFromEnum(plugin_api.AbiStatus.ok);
 }
 

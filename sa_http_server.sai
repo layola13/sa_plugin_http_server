@@ -14,7 +14,7 @@
 @extern sa_http_server_resp_stream_write(resp: ptr, &body: ptr, body_len: u64) -> u32
 @extern sa_http_server_resp_stream_flush(resp: ptr) -> u32
 @extern sa_http_server_resp_stream_end(resp: ptr) -> u32
-@extern sa_http_server_resp_stream_free(^resp: ptr) -> u32
-@extern sa_http_server_resp_free(^resp: ptr) -> u32
-@extern sa_http_server_req_free(^req: ptr) -> u32
-@extern sa_http_server_free(^server: ptr) -> u32
+@extern sa_http_server_resp_stream_free(resp: ptr) -> u32
+@extern sa_http_server_resp_free(resp: ptr) -> u32
+@extern sa_http_server_req_free(req: ptr) -> u32
+@extern sa_http_server_free(server: ptr) -> u32

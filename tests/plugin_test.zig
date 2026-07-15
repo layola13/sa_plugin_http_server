@@ -231,6 +231,53 @@ test "http server saasm api can send typed plain response" {
     client_thread.join();
 }
 
+test "http server saasm api accepts null pointer for zero-length body" {
+    const port: u16 = 18084;
+    var server: ?*anyopaque = null;
+    try std.testing.expectEqual(@as(u32, 0), plugin.sa_http_server_new(&server));
+    defer _ = plugin.sa_http_server_free(server);
+
+    const host = "127.0.0.1";
+    try std.testing.expectEqual(@as(u32, 0), plugin.sa_http_server_start(server, host.ptr, host.len, port));
+
+    const client_thread = try std.Thread.spawn(.{}, struct {
+        fn run() !void {
+            var stream = blk: {
+                var attempt: usize = 0;
+                while (attempt < 50) : (attempt += 1) {
+                    const connected = std.net.tcpConnectToHost(std.testing.allocator, "127.0.0.1", 18084) catch |err| switch (err) {
+                        error.ConnectionRefused => {
+                            std.time.sleep(20 * std.time.ns_per_ms);
+                            continue;
+                        },
+                        else => return err,
+                    };
+                    break :blk connected;
+                }
+                return error.ConnectionRefused;
+            };
+            defer stream.close();
+            try stream.writeAll("GET /empty HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n");
+            var response_buf: [512]u8 = undefined;
+            const n = try stream.read(&response_buf);
+            const response = response_buf[0..n];
+            try std.testing.expect(std.mem.indexOf(u8, response, "HTTP/1.1 204") != null);
+            try std.testing.expect(std.mem.indexOf(u8, response, "content-length: 0") != null);
+        }
+    }.run, .{});
+
+    var req: ?*anyopaque = null;
+    try std.testing.expectEqual(@as(u32, 0), plugin.sa_http_server_accept(server, &req));
+    defer _ = plugin.sa_http_server_req_free(req);
+
+    var resp: ?*anyopaque = null;
+    try std.testing.expectEqual(@as(u32, 0), plugin.sa_http_server_resp_new(req, 204, &resp));
+    try std.testing.expectEqual(@as(u32, 0), plugin.sa_http_server_resp_send(resp, null, 0));
+    _ = plugin.sa_http_server_resp_free(resp);
+
+    client_thread.join();
+}
+
 test "http server plugin serve responds on a local loopback socket" {
     var stdout_buf = std.ArrayList(u8).init(std.testing.allocator);
     defer stdout_buf.deinit();
