@@ -1,7 +1,10 @@
 const std = @import("std");
 const plugin_api = @import("plugin_api");
 const plugin_helpers = @import("plugin_helpers.zig");
+const http_server_interface = @import("http_server_interface");
 pub usingnamespace @import("http_saasm_api.zig");
+
+pub const interface_source = http_server_interface.source;
 
 const skills = [_]plugin_api.SkillSection{
     .{
@@ -169,13 +172,7 @@ pub fn runHttpServerCommand(ctx: *const plugin_api.Context, argv: []const []cons
     const readme_path = try std.fs.path.join(ctx.allocator, &.{ root, "README.md" });
     defer ctx.allocator.free(readme_path);
 
-    try writeFile(iface_path,
-        \\@extern sa_http_server_new(&out_server: ptr) -> i32!
-        \\@extern sa_http_server_route(server: ptr, &path: ptr, path_len: u64, ^handler: ptr) -> i32!
-        \\@extern sa_http_server_start(server: ptr, &host: ptr, host_len: u64, port: u16) -> i32!
-        \\@extern sa_http_server_resp_new(req: ptr, status: u16, &out_resp: ptr) -> i32!
-        \\@extern sa_http_server_resp_send(resp: ptr, &body_ptr: ptr, body_len: u64) -> i32!
-    );
+    try writeFile(iface_path, interface_source);
 
     try writeFile(main_path,
         \\@export hubproxy_main():

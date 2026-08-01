@@ -4,6 +4,10 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
     const sci_root = b.option([]const u8, "sci-root", "Path to the sci checkout") orelse "../../sci";
+    const interface_source = std.fs.cwd().readFileAlloc(b.allocator, b.pathFromRoot("sa_http_server.sai"), 1024 * 1024) catch
+        @panic("unable to read sa_http_server.sai");
+    const interface_options = b.addOptions();
+    interface_options.addOption([]const u8, "source", interface_source);
     const sa_net_primitives = b.createModule(.{
         .root_source_file = b.path(b.pathJoin(&.{ sci_root, "src", "runtime", "sa_net_primitives.zig" })),
         .target = target,
@@ -22,6 +26,7 @@ pub fn build(b: *std.Build) void {
     });
     root_module.addImport("plugin_api", plugin_api);
     root_module.addImport("sa_net_primitives", sa_net_primitives);
+    root_module.addOptions("http_server_interface", interface_options);
     const lib = b.addLibrary(.{
         .name = "http-server",
         .root_module = root_module,

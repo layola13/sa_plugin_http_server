@@ -18,3 +18,33 @@
 @extern sa_http_server_resp_free(resp: ptr) -> u32
 @extern sa_http_server_req_free(req: ptr) -> u32
 @extern sa_http_server_free(server: ptr) -> u32
+@extern sa_http_server_websocket_upgrade(req: ptr, &out_ws: ptr) -> u32
+@extern sa_http_server_websocket_read(ws: ptr, max_len: u64, &out_opcode: ptr, &out_data: ptr, &out_len: ptr) -> u32
+@extern sa_http_server_websocket_write(ws: ptr, opcode: u8, &data: ptr, data_len: u64) -> u32
+@extern sa_http_server_websocket_free(ws: ptr) -> u32
+
+// v2 network status: ok=0, would_block=1, closed=2, timeout=3,
+// too_large=4, invalid=5, io_error=6.
+// Poll interests/events: readable=1, writable=2, closed=4.
+// A successful WebSocket upgrade consumes the request handle.
+@extern sa_http_server_new_v2(&out_server: ptr) -> u32
+@extern sa_http_server_start_v2(server: ptr, &host: ptr, host_len: u64, port: u16) -> u32
+@extern sa_http_server_accept_v2(server: ptr, timeout_ms: u32, &out_req: ptr) -> u32
+@extern sa_http_server_req_free_v2(req: ptr) -> u32
+@extern sa_http_server_resp_new_v2(req: ptr, status: u16, &out_resp: ptr) -> u32
+@extern sa_http_server_resp_add_header_v2(resp: ptr, &name: ptr, name_len: u64, &value: ptr, value_len: u64) -> u32
+@extern sa_http_server_resp_send_v2(resp: ptr, &body: ptr, body_len: u64, timeout_ms: u32) -> u32
+@extern sa_http_server_resp_free_v2(resp: ptr) -> u32
+@extern sa_http_server_resp_stream_new_v2(req: ptr, status: u16, &out_resp: ptr) -> u32
+@extern sa_http_server_resp_stream_add_header_v2(resp: ptr, &name: ptr, name_len: u64, &value: ptr, value_len: u64) -> u32
+@extern sa_http_server_resp_stream_write_v2(resp: ptr, &body: ptr, body_len: u64, timeout_ms: u32) -> u32
+@extern sa_http_server_resp_stream_flush_v2(resp: ptr) -> u32
+@extern sa_http_server_resp_stream_end_v2(resp: ptr, timeout_ms: u32) -> u32
+@extern sa_http_server_resp_stream_free_v2(resp: ptr) -> u32
+@extern sa_http_server_free_v2(server: ptr) -> u32
+@extern sa_http_server_websocket_upgrade_v2(req: ptr, &out_ws: ptr) -> u32
+@extern sa_http_server_websocket_poll_v2(ws: ptr, interests: u32, timeout_ms: u32, &out_events: ptr) -> u32
+@extern sa_http_server_websocket_read_v2(ws: ptr, max_len: u64, &out_opcode: ptr, &out_data: ptr, &out_len: ptr) -> u32
+@extern sa_http_server_websocket_write_v2(ws: ptr, opcode: u8, &data: ptr, data_len: u64, &out_written: ptr) -> u32
+@extern sa_http_server_websocket_close_v2(ws: ptr, code: u16, &reason: ptr, reason_len: u64) -> u32
+@extern sa_http_server_websocket_free_v2(ws: ptr) -> u32
