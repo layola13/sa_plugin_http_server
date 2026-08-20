@@ -3,7 +3,7 @@ const std = @import("std");
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
-    const sci_root = b.option([]const u8, "sci-root", "Path to the sci checkout") orelse "../../sci";
+    const sci_root = b.option([]const u8, "sci-root", "Path to the sci checkout") orelse "../sci";
     const interface_source = std.fs.cwd().readFileAlloc(b.allocator, b.pathFromRoot("sa_http_server.sai"), 1024 * 1024) catch
         @panic("unable to read sa_http_server.sai");
     const interface_options = b.addOptions();

@@ -297,7 +297,7 @@ pub export fn sa_http_server_accept_v2(server: ?*anyopaque, timeout_ms: u32, out
         break :blk @intCast(@as(u64, timeout_ms) - elapsed_ms);
     };
     const request = srv.acceptWithBodyLimitAndTimeout(max_v2_message_bytes, receive_timeout_ms) catch |err| {
-        if (err == error.WouldBlock or err == error.HttpHeadersUnreadable) return networkStatus(if (timeout_ms == 0) .would_block else .timeout);
+        if (err == error.WouldBlock or err == error.HttpHeadersUnreadable or err == error.HttpRequestTruncated or err == error.HttpConnectionClosing) return networkStatus(if (timeout_ms == 0) .would_block else .timeout);
         return networkStatus(core.statusFromError(err));
     };
     slot.* = @ptrCast(request);

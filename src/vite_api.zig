@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const sa_std_net = @import("sa_std_net.zig");
 
 var sigpipe_once = std.once(installSigpipeHandler);
@@ -95,6 +96,13 @@ pub fn pollStream(stream: std.net.Stream, events: i16, timeout_ms: u32, out_even
 }
 
 fn setNonBlocking(stream: std.net.Stream) !void {
+    if (comptime builtin.os.tag == .windows) {
+        var mode: u32 = 1;
+        if (std.os.windows.ws2_32.ioctlsocket(stream.handle, std.os.windows.ws2_32.FIONBIO, &mode) == std.os.windows.ws2_32.SOCKET_ERROR) {
+            return error.Unexpected;
+        }
+        return;
+    }
     const flags = try std.posix.fcntl(stream.handle, std.posix.F.GETFL, 0);
     const nonblocking = flags | (@as(usize, 1) << @bitOffsetOf(std.posix.O, "NONBLOCK"));
     _ = try std.posix.fcntl(stream.handle, std.posix.F.SETFL, nonblocking);
@@ -107,6 +115,23 @@ fn setReceiveTimeout(stream: std.net.Stream, timeout_ms: u32) !void {
         .usec = @intCast((timeout_ms % 1000) * 1000),
     };
     try std.posix.setsockopt(stream.handle, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, std.mem.asBytes(&timeout));
+}
+
+fn writeSocket(stream: std.net.Stream, bytes: []const u8) !usize {
+    if (comptime builtin.os.tag == .windows) {
+        const windows = std.os.windows;
+        const len: i32 = @intCast(@min(bytes.len, @as(usize, std.math.maxInt(i32))));
+        const result = windows.ws2_32.send(stream.handle, bytes.ptr, len, 0);
+        if (result == windows.ws2_32.SOCKET_ERROR) {
+            return switch (windows.ws2_32.WSAGetLastError()) {
+                .WSAEWOULDBLOCK => error.WouldBlock,
+                .WSAECONNRESET, .WSAECONNABORTED, .WSAENOTCONN => error.ConnectionResetByPeer,
+                else => error.Unexpected,
+            };
+        }
+        return @intCast(result);
+    }
+    return std.posix.write(stream.handle, bytes);
 }
 
 fn validHeaderName(name: []const u8) bool {
@@ -644,7 +669,7 @@ fn replaceLastMessage(handle: *WebSocketHandle, payload: []u8, out_ptr: *?[*]con
 fn flushPendingWrite(handle: *WebSocketHandle) NetworkStatus {
     const pending = handle.pending_write orelse return .ok;
     while (handle.pending_offset < pending.len) {
-        const written = handle.stream.write(pending[handle.pending_offset..]) catch |err| return statusFromError(err);
+        const written = writeSocket(handle.stream, pending[handle.pending_offset..]) catch |err| return statusFromError(err);
         if (written == 0) {
             handle.peer_closed = true;
             return .closed;
@@ -683,7 +708,7 @@ pub fn writeFrameV2(handle: *WebSocketHandle, opcode: u8, payload: []const u8) N
     handle.pending_offset = 0;
     const status = flushPendingWrite(handle);
     return switch (status) {
-        .would_block => .ok,
+        .would_block => .would_block,
         else => status,
     };
 }
@@ -868,7 +893,7 @@ pub fn closeWebSocketV2(handle: *WebSocketHandle, code: u16, reason: []const u8)
     handle.close_sent = true;
     const status = flushPendingWrite(handle);
     return switch (status) {
-        .would_block => .ok,
+        .would_block => .would_block,
         else => status,
     };
 }

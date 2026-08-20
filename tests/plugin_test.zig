@@ -30,6 +30,36 @@ fn dupeZArgs(allocator: std.mem.Allocator, argv: []const []const u8) ![][*:0]con
     return out;
 }
 
+fn setTestReceiveTimeout(stream: std.net.Stream, timeout_ms: u32) !void {
+    const timeout = std.posix.timeval{
+        .sec = @intCast(timeout_ms / 1000),
+        .usec = @intCast((timeout_ms % 1000) * 1000),
+    };
+    try std.posix.setsockopt(stream.handle, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, std.mem.asBytes(&timeout));
+}
+fn readResponseUntil(stream: std.net.Stream, buffer: []u8, needle: []const u8, timeout_ms: u32) !usize {
+    const start_ms = std.time.milliTimestamp();
+    var length: usize = 0;
+    while (length < buffer.len) {
+        const elapsed_ms: u64 = @intCast(@max(0, std.time.milliTimestamp() - start_ms));
+        if (elapsed_ms >= timeout_ms) return error.TestTimeout;
+        var poll_fds = [_]std.posix.pollfd{.{
+            .fd = stream.handle,
+            .events = std.posix.POLL.IN,
+            .revents = 0,
+        }};
+        const remaining_ms: i32 = @intCast(timeout_ms - elapsed_ms);
+        if (try std.posix.poll(&poll_fds, remaining_ms) == 0) return error.TestTimeout;
+        const count = stream.read(buffer[length..]) catch |err| switch (err) {
+            error.ConnectionResetByPeer, error.WouldBlock, error.ConnectionTimedOut => return error.TestTimeout,
+            else => return err,
+        };
+        if (count == 0) return error.TestTimeout;
+        length += count;
+        if (std.mem.indexOf(u8, buffer[0..length], needle) != null) return length;
+    }
+    return error.TestTimeout;
+}
 fn freeZArgs(allocator: std.mem.Allocator, argv: [][*:0]const u8) void {
     for (argv) |arg| allocator.free(std.mem.sliceTo(arg, 0));
     allocator.free(argv);
@@ -273,89 +303,108 @@ test "http server saasm api accepts null pointer for zero-length body" {
 }
 
 test "http server plugin serve responds on a local loopback socket" {
-    var stdout_buf = std.ArrayList(u8).init(std.testing.allocator);
+    var stdout_buf = std.ArrayList(u8).init(std.heap.page_allocator);
     defer stdout_buf.deinit();
-    var stderr_buf = std.ArrayList(u8).init(std.testing.allocator);
+    var stderr_buf = std.ArrayList(u8).init(std.heap.page_allocator);
     defer stderr_buf.deinit();
+    var stdout_writer = stdout_buf.writer();
+    var stderr_writer = stderr_buf.writer();
 
     const port: u16 = 18080;
     const argv = [_][]const u8{ "sa", "http-server", "serve", "127.0.0.1", "18080", "1" };
-    var ctx = plugin_api.Context{ .allocator = std.testing.allocator };
+    var ctx = plugin_api.Context{ .allocator = std.heap.page_allocator };
     const serve_thread = try std.Thread.spawn(.{}, struct {
         fn run(context: *plugin_api.Context, args: []const []const u8, stdout: std.io.AnyWriter, stderr: std.io.AnyWriter) void {
             _ = plugin.runHttpServerCommand(context, args, stdout, stderr) catch {};
         }
-    }.run, .{ &ctx, argv[0..], stdout_buf.writer().any(), stderr_buf.writer().any() });
+    }.run, .{ &ctx, argv[0..], stdout_writer.any(), stderr_writer.any() });
+    var serve_joined = false;
+    defer if (!serve_joined) serve_thread.join();
 
     var client = blk: {
         var attempt: usize = 0;
         while (attempt < 50) : (attempt += 1) {
-            const stream = std.net.tcpConnectToHost(std.testing.allocator, "127.0.0.1", port) catch |err| switch (err) {
+            const stream = std.net.tcpConnectToHost(std.heap.page_allocator, "127.0.0.1", port) catch |err| switch (err) {
                 error.ConnectionRefused => {
                     std.time.sleep(20 * std.time.ns_per_ms);
                     continue;
                 },
-                else => return err,
+                else => {
+                    serve_thread.join();
+                    serve_joined = true;
+                    return err;
+                },
             };
             break :blk stream;
         }
+        serve_thread.join();
+        serve_joined = true;
         return error.ConnectionRefused;
     };
     defer client.close();
     try client.writeAll("GET /echo HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: text/plain\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello");
 
     var response_buf: [256]u8 = undefined;
-    const n = try client.read(&response_buf);
-    try std.testing.expect(n > 0);
-    try std.testing.expect(std.mem.indexOf(u8, response_buf[0..n], "hello") != null);
-
+    const read_result = readResponseUntil(client, &response_buf, "hello", 2000);
+    const response_len = try read_result;
+    try std.testing.expect(std.mem.indexOf(u8, response_buf[0..response_len], "hello") != null);
     serve_thread.join();
+    serve_joined = true;
     try std.testing.expectEqualStrings("route=echo path=/echo body=5\n", stdout_buf.items);
     try std.testing.expectEqual(@as(usize, 0), stderr_buf.items.len);
 }
-
 test "http server plugin stream route returns chunked SSE body" {
-    var stdout_buf = std.ArrayList(u8).init(std.testing.allocator);
+    var stdout_buf = std.ArrayList(u8).init(std.heap.page_allocator);
     defer stdout_buf.deinit();
-    var stderr_buf = std.ArrayList(u8).init(std.testing.allocator);
+    var stderr_buf = std.ArrayList(u8).init(std.heap.page_allocator);
     defer stderr_buf.deinit();
+    var stdout_writer = stdout_buf.writer();
+    var stderr_writer = stderr_buf.writer();
 
     const port: u16 = 18081;
     const argv = [_][]const u8{ "sa", "http-server", "serve", "127.0.0.1", "18081", "1" };
-    var ctx = plugin_api.Context{ .allocator = std.testing.allocator };
+    var ctx = plugin_api.Context{ .allocator = std.heap.page_allocator };
     const serve_thread = try std.Thread.spawn(.{}, struct {
         fn run(context: *plugin_api.Context, args: []const []const u8, stdout: std.io.AnyWriter, stderr: std.io.AnyWriter) void {
             _ = plugin.runHttpServerCommand(context, args, stdout, stderr) catch {};
         }
-    }.run, .{ &ctx, argv[0..], stdout_buf.writer().any(), stderr_buf.writer().any() });
+    }.run, .{ &ctx, argv[0..], stdout_writer.any(), stderr_writer.any() });
+    var serve_joined = false;
+    defer if (!serve_joined) serve_thread.join();
 
     var client = blk: {
         var attempt: usize = 0;
         while (attempt < 50) : (attempt += 1) {
-            const stream = std.net.tcpConnectToHost(std.testing.allocator, "127.0.0.1", port) catch |err| switch (err) {
+            const stream = std.net.tcpConnectToHost(std.heap.page_allocator, "127.0.0.1", port) catch |err| switch (err) {
                 error.ConnectionRefused => {
                     std.time.sleep(20 * std.time.ns_per_ms);
                     continue;
                 },
-                else => return err,
+                else => {
+                    serve_thread.join();
+                    serve_joined = true;
+                    return err;
+                },
             };
             break :blk stream;
         }
+        serve_thread.join();
+        serve_joined = true;
         return error.ConnectionRefused;
     };
     defer client.close();
     try client.writeAll("GET /stream HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n");
 
     var response_buf: [512]u8 = undefined;
-    const n = try client.read(&response_buf);
-    try std.testing.expect(n > 0);
-    try std.testing.expect(std.mem.indexOf(u8, response_buf[0..n], "data: first") != null);
-
+    const read_result = readResponseUntil(client, &response_buf, "data: second", 2000);
+    std.time.sleep(100 * std.time.ns_per_ms);
+    const response_len = try read_result;
+    try std.testing.expect(std.mem.indexOf(u8, response_buf[0..response_len], "data: first") != null);
     serve_thread.join();
+    serve_joined = true;
     try std.testing.expectEqualStrings("route=stream path=/stream\n", stdout_buf.items);
     try std.testing.expectEqual(@as(usize, 0), stderr_buf.items.len);
 }
-
 fn connectEventually(port: u16) !std.net.Stream {
     var attempt: usize = 0;
     while (attempt < 50) : (attempt += 1) {
@@ -613,6 +662,7 @@ const BackpressureClientState = struct {
     handshake_ok: bool = false,
     bytes_read: usize = 0,
     failed: bool = false,
+    allow_read: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
 };
 
 fn websocketBackpressureClient(port: u16, state: *BackpressureClientState) void {
@@ -639,9 +689,26 @@ fn websocketBackpressureClient(port: u16, state: *BackpressureClientState) void 
     };
     state.handshake_ok = std.mem.indexOf(u8, handshake[0..handshake_len], "101 Switching Protocols") != null;
 
-    std.time.sleep(200 * std.time.ns_per_ms);
+    var wait_attempt: usize = 0;
+    while (!state.allow_read.load(.acquire) and wait_attempt < 5000) : (wait_attempt += 1) {
+        std.time.sleep(std.time.ns_per_ms);
+    }
+    if (!state.allow_read.load(.acquire)) return;
     var buffer: [8192]u8 = undefined;
     while (true) {
+        var poll_fds = [_]std.posix.pollfd{.{
+            .fd = stream.handle,
+            .events = std.posix.POLL.IN,
+            .revents = 0,
+        }};
+        const ready = std.posix.poll(&poll_fds, 5000) catch {
+            state.failed = true;
+            return;
+        };
+        if (ready == 0) {
+            state.failed = true;
+            return;
+        }
         const count = stream.read(&buffer) catch |err| switch (err) {
             error.ConnectionResetByPeer => return,
             else => {
@@ -664,6 +731,7 @@ test "http server v2 websocket reports and recovers from bounded backpressure" {
     var client_state = BackpressureClientState{};
     const client_thread = try std.Thread.spawn(.{}, websocketBackpressureClient, .{ @as(u16, 18088), &client_state });
     var client_joined = false;
+    defer client_state.allow_read.store(true, .release);
     defer if (!client_joined) client_thread.join();
 
     var req: ?*anyopaque = null;
@@ -699,6 +767,7 @@ test "http server v2 websocket reports and recovers from bounded backpressure" {
         try std.testing.expectEqual(@as(u64, payload.len), written);
     }
     try std.testing.expect(saw_backpressure);
+    client_state.allow_read.store(true, .release);
 
     var events: u32 = 0;
     try std.testing.expectEqual(@as(u32, 1), plugin.sa_http_server_websocket_poll_v2(ws, plugin.PollEvent.writable, 0, &events));

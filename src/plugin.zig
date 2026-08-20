@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const plugin_api = @import("plugin_api");
 const plugin_helpers = @import("plugin_helpers.zig");
 const http_server_interface = @import("http_server_interface");
@@ -78,15 +79,19 @@ pub fn handleRoute(
     stdout: std.io.AnyWriter,
     stderr: std.io.AnyWriter,
 ) !void {
-    const path = requestPath(request.head.target);
-    const content_type = headerValue(request, "content-type") orelse "";
+    const stable_target = try ctx.allocator.dupe(u8, request.head.target);
+    defer ctx.allocator.free(stable_target);
+    const path = requestPath(stable_target);
+    const content_type_source = headerValue(request, "content-type") orelse "";
+    const stable_content_type = try ctx.allocator.dupe(u8, content_type_source);
+    defer ctx.allocator.free(stable_content_type);
 
     if (std.mem.eql(u8, path, "/echo")) {
         const body = try readRequestBodyAlloc(ctx, request);
         defer ctx.allocator.free(body);
         try request.respond(body, .{
             .status = .ok,
-            .extra_headers = if (content_type.len == 0) &.{} else &.{.{ .name = "content-type", .value = content_type }},
+            .extra_headers = if (stable_content_type.len == 0) &.{} else &.{.{ .name = "content-type", .value = stable_content_type }},
         });
         try stdout.print("route=echo path={s} body={d}\n", .{ path, body.len });
         return;
@@ -112,6 +117,24 @@ pub fn handleRoute(
     try stderr.print("error: unknown route {s}\n", .{path});
 }
 
+fn setServeReceiveTimeout(stream: std.net.Stream, timeout_ms: u32) !void {
+    const timeout = std.posix.timeval{
+        .sec = @intCast(timeout_ms / 1000),
+        .usec = @intCast((timeout_ms % 1000) * 1000),
+    };
+    try std.posix.setsockopt(stream.handle, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, std.mem.asBytes(&timeout));
+}
+
+fn setServeStreamBlocking(stream: std.net.Stream) !void {
+    if (builtin.os.tag == .windows) {
+        var mode: c_ulong = 0;
+        const windows = std.os.windows;
+        if (windows.ws2_32.ioctlsocket(stream.handle, windows.ws2_32.FIONBIO, &mode) == windows.ws2_32.SOCKET_ERROR) {
+            return error.SocketOperationFailed;
+        }
+    }
+}
+
 pub fn runServeCommand(ctx: *const plugin_api.Context, argv: []const []const u8, stdout: std.io.AnyWriter, stderr: std.io.AnyWriter) anyerror!?u8 {
     if (argv.len < 2) return null;
     if (!std.mem.eql(u8, argv[1], "http-server")) return null;
@@ -127,13 +150,32 @@ pub fn runServeCommand(ctx: *const plugin_api.Context, argv: []const []const u8,
         max_requests = std.fmt.parseInt(usize, argv[5], 10) catch return error.InvalidPath;
     }
     const address = std.net.Address.parseIp(host, port) catch return error.InvalidPath;
-    var server = try address.listen(.{ .reuse_address = true });
+    var server = try address.listen(.{ .reuse_address = true, .force_nonblocking = true });
     defer server.deinit();
 
     var served: usize = 0;
     while (max_requests == null or served < max_requests.?) {
-        var accepted = try server.accept();
+        var poll_fds = [_]std.posix.pollfd{.{
+            .fd = server.stream.handle,
+            .events = std.posix.POLL.IN,
+            .revents = 0,
+        }};
+        const poll_result = std.posix.poll(&poll_fds, if (max_requests == null) 1000 else 100) catch |err| {
+            try stderr.print("error: listener poll failed: {}\n", .{err});
+            return 1;
+        };
+        if (poll_result == 0) continue;
+        if ((poll_fds[0].revents & (std.posix.POLL.ERR | std.posix.POLL.HUP | std.posix.POLL.NVAL)) != 0) {
+            try stderr.print("error: listener poll returned failure events\n", .{});
+            return 1;
+        }
+        var accepted = server.accept() catch |err| switch (err) {
+            error.WouldBlock => continue,
+            else => return err,
+        };
         defer accepted.stream.close();
+        try setServeStreamBlocking(accepted.stream);
+        try setServeReceiveTimeout(accepted.stream, 2000);
 
         var request_buffer: [4096]u8 = undefined;
         var http_server = std.http.Server.init(accepted, &request_buffer);
