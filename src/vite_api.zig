@@ -237,9 +237,43 @@ const PollOutcome = struct {
     listener_ready: bool,
 };
 
+/// Request handler for sa_http_server_serve_threaded:
+/// `fn (req: ?*anyopaque, ctx: ?*anyopaque) callconv(.c) void`.
+/// Runs on plugin pool threads. The handler owns the request: it must send a
+/// response (or upgrade) and then call sa_http_server_req_free, which
+/// recycles keep-alive connections back into the pool.
+pub const HttpServeHandlerFn = *const fn (?*anyopaque, ?*anyopaque) callconv(.c) void;
+
+pub const ThreadPool = struct {
+    server: *HttpServer,
+    threads: []std.Thread,
+    handler: HttpServeHandlerFn,
+    handler_ctx: ?*anyopaque,
+    max_requests: u64,
+    served: std.atomic.Value(u64),
+    stopping: std.atomic.Value(bool),
+};
+
+fn workerMain(pool: *ThreadPool) void {
+    const srv = pool.server;
+    while (!pool.stopping.load(.acquire)) {
+        if (pool.max_requests != 0 and pool.served.load(.acquire) >= pool.max_requests) break;
+        const req = srv.acceptWorker(&pool.stopping) catch continue;
+        _ = pool.served.fetchAdd(1, .acq_rel);
+        pool.handler(@ptrCast(req), pool.handler_ctx);
+    }
+}
+
+/// Bound on the request-head parse for connections accepted by the plugin
+/// thread pool (slowloris guard for serve_threaded).
+const worker_head_parse_timeout_ms: u32 = 5000;
+
 pub const HttpServer = struct {
     allocator: std.mem.Allocator,
     server: ?std.net.Server = null,
+    /// v1 request body limit. Default 2MB (historic); configurable via
+    /// sa_http_server_set_max_body_bytes. v2 always uses 16MB.
+    max_body_len: usize = 2 * 1024 * 1024,
     /// Idle keep-alive connections waiting for their next request.
     recycled: std.ArrayList(*ConnState),
     recycled_mutex: std.Thread.Mutex = .{},
@@ -249,6 +283,8 @@ pub const HttpServer = struct {
     /// without this the next request on a reused connection could sleep
     /// until the poll timeout.
     wake_pipe: [2]std.posix.fd_t,
+    /// Active plugin-internal thread pool (serve_threaded), if any.
+    pool: ?*ThreadPool = null,
 
     pub fn init(allocator: std.mem.Allocator) !*HttpServer {
         const self = try allocator.create(HttpServer);
@@ -291,8 +327,91 @@ pub const HttpServer = struct {
         };
     }
 
+    pub fn setMaxBodyLen(self: *HttpServer, max_bytes: usize) !void {
+        if (max_bytes == 0 or max_bytes > (1 << 30)) return error.InvalidArgument;
+        self.max_body_len = max_bytes;
+    }
+
     pub fn accept(self: *HttpServer) !*HttpRequest {
-        return self.acceptConfigured(2 * 1024 * 1024, null);
+        return self.acceptConfigured(self.max_body_len, null);
+    }
+
+    /// Worker accept for serve_threaded: poll-driven like acceptConfigured
+    /// but with a 1s poll slice so stopServing() is noticed promptly, and a
+    /// bounded head parse (slowloris guard). Returns error.WouldBlock on
+    /// timeout or when stopping so the worker loop can re-check.
+    fn acceptWorker(self: *HttpServer, stopping: *const std.atomic.Value(bool)) !*HttpRequest {
+        while (true) {
+            if (stopping.load(.acquire)) return error.WouldBlock;
+            const pr = self.pollAcceptEx(1000);
+            switch (pr.status) {
+                .ok => {
+                    if (pr.recycled_ready) {
+                        if (self.drainRecycled(self.max_body_len, null)) |req| return req;
+                    }
+                    if (pr.listener_ready) {
+                        if (try self.acceptFresh(self.max_body_len, worker_head_parse_timeout_ms, null, true)) |req| return req;
+                    }
+                },
+                .timeout => return error.WouldBlock,
+                else => return error.ConnectionAborted,
+            }
+        }
+    }
+
+    pub fn serveThreaded(
+        self: *HttpServer,
+        num_threads: u32,
+        handler: HttpServeHandlerFn,
+        handler_ctx: ?*anyopaque,
+        max_requests: u64,
+    ) !void {
+        if (self.server == null) return error.NotStarted;
+        if (self.pool != null) return error.AlreadyServing;
+        var n: usize = num_threads;
+        if (n == 0) n = std.Thread.getCpuCount() catch 4;
+        n = @min(@max(n, 1), 256);
+
+        const pool = try self.allocator.create(ThreadPool);
+        errdefer self.allocator.destroy(pool);
+        const threads = try self.allocator.alloc(std.Thread, n);
+        errdefer self.allocator.free(threads);
+        pool.* = .{
+            .server = self,
+            .threads = threads,
+            .handler = handler,
+            .handler_ctx = handler_ctx,
+            .max_requests = max_requests,
+            .served = std.atomic.Value(u64).init(0),
+            .stopping = std.atomic.Value(bool).init(false),
+        };
+        self.pool = pool;
+
+        var started: usize = 0;
+        while (started < n) : (started += 1) {
+            threads[started] = std.Thread.spawn(.{}, workerMain, .{pool}) catch |err| {
+                pool.stopping.store(true, .release);
+                for (threads[0..started]) |t| t.join();
+                self.pool = null;
+                self.allocator.free(threads);
+                self.allocator.destroy(pool);
+                return err;
+            };
+        }
+        for (threads) |t| t.join();
+        self.pool = null;
+        self.allocator.free(threads);
+        self.allocator.destroy(pool);
+    }
+
+    /// Ask a running serveThreaded loop to stop. Wakes workers blocked in
+    /// poll() via listener shutdown; in-flight handlers run to completion.
+    /// NOTE: the shutdown also closes the listening socket, so the server
+    /// handle cannot accept new connections afterwards — free it with
+    /// sa_http_server_free once the loop has returned.
+    pub fn stopServing(self: *HttpServer) void {
+        if (self.pool) |pool| pool.stopping.store(true, .release);
+        if (self.server) |*s| std.posix.shutdown(s.stream.handle, .both) catch {};
     }
 
     /// Public pollable status (v2 ABI). See pollAcceptEx for the internals.

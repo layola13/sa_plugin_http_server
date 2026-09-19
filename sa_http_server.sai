@@ -28,6 +28,15 @@
 // Streaming: resp_stream_write buffers (8KB auto-flush); resp_stream_flush
 // pushes buffered bytes to the socket for real; end terminates the chunked
 // stream. After a WebSocket upgrade the HTTP connection is consumed.
+// serve_threaded runs a fixed-size plugin-internal accept loop (0 threads =
+// CPU count, clamped 1..256); the handler (fn(req: ptr, ctx: ptr)) owns each
+// request and must resp/upgrade + req_free it. stop_serving wakes the loop
+// via listener shutdown; free the server once serve_threaded has returned.
+// set_max_body_bytes configures the v1 body limit (default 2MB; rejects 0
+// or >1GB); v2 always uses 16MB.
+@extern sa_http_server_serve_threaded(server: ptr, num_threads: u32, handler: ptr, handler_ctx: ptr, max_requests: u64) -> u32
+@extern sa_http_server_stop_serving(server: ptr) -> u32
+@extern sa_http_server_set_max_body_bytes(server: ptr, max_bytes: u64) -> u32
 
 // v2 network status: ok=0, would_block=1, closed=2, timeout=3,
 // too_large=4, invalid=5, io_error=6.

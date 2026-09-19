@@ -223,6 +223,45 @@ pub export fn sa_http_server_free(server: ?*anyopaque) u32 {
     return @intFromEnum(plugin_api.AbiStatus.ok);
 }
 
+/// Sets the v1 request body limit (default 2MB). Rejects 0 or >1GB.
+/// v2's 16MB limit is unchanged.
+pub export fn sa_http_server_set_max_body_bytes(server: ?*anyopaque, max_bytes: u64) u32 {
+    const srv_ptr = server orelse return @intFromEnum(plugin_api.AbiStatus.failed);
+    const srv = @as(*HttpServer, @ptrCast(@alignCast(srv_ptr)));
+    srv.setMaxBodyLen(@intCast(max_bytes)) catch return @intFromEnum(plugin_api.AbiStatus.failed);
+    return @intFromEnum(plugin_api.AbiStatus.ok);
+}
+
+/// Runs a fixed-size plugin-internal accept loop: `num_threads` worker
+/// threads invoke `handler(req, handler_ctx)` per accepted request (the
+/// handler owns the request and must resp/upgrade + req_free it). Blocks
+/// until sa_http_server_stop_serving is called or max_requests requests were
+/// accepted (0 = unlimited). num_threads=0 uses the CPU count (1..256 clamp).
+pub export fn sa_http_server_serve_threaded(
+    server: ?*anyopaque,
+    num_threads: u32,
+    handler: ?*const fn (?*anyopaque, ?*anyopaque) callconv(.c) void,
+    handler_ctx: ?*anyopaque,
+    max_requests: u64,
+) u32 {
+    const srv_ptr = server orelse return @intFromEnum(plugin_api.AbiStatus.failed);
+    const h = handler orelse return @intFromEnum(plugin_api.AbiStatus.failed);
+    const srv = @as(*HttpServer, @ptrCast(@alignCast(srv_ptr)));
+    srv.serveThreaded(num_threads, h, handler_ctx, max_requests) catch return @intFromEnum(plugin_api.AbiStatus.failed);
+    return @intFromEnum(plugin_api.AbiStatus.ok);
+}
+
+/// Signals a running sa_http_server_serve_threaded loop to stop. Wakes
+/// workers blocked in poll() via listener shutdown; in-flight handlers run
+/// to completion. The listening socket is shut down, so the server handle
+/// cannot accept afterwards — free it once serve_threaded has returned.
+pub export fn sa_http_server_stop_serving(server: ?*anyopaque) u32 {
+    const srv_ptr = server orelse return @intFromEnum(plugin_api.AbiStatus.failed);
+    const srv = @as(*HttpServer, @ptrCast(@alignCast(srv_ptr)));
+    srv.stopServing();
+    return @intFromEnum(plugin_api.AbiStatus.ok);
+}
+
 pub export fn sa_http_server_websocket_upgrade(req: ?*anyopaque, out_ws: ?*?*anyopaque) u32 {
     const req_ptr = req orelse return @intFromEnum(plugin_api.AbiStatus.failed);
     const slot = out_ws orelse return @intFromEnum(plugin_api.AbiStatus.failed);

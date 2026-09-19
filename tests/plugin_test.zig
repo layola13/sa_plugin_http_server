@@ -963,3 +963,98 @@ test "http server stream flush is real and chunked connections are reusable" {
     try std.testing.expect(std.mem.indexOf(u8, rbuf[0..rn], "path=/after-stream") != null);
     while (!state.finished.load(.acquire)) std.time.sleep(1 * std.time.ns_per_ms);
 }
+
+const ThreadedState = struct {
+    count: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
+};
+
+fn threadedHandler(req: ?*anyopaque, ctx: ?*anyopaque) callconv(.c) void {
+    const st: *ThreadedState = @ptrCast(@alignCast(ctx.?));
+    const r = req.?;
+    var resp: ?*anyopaque = null;
+    if (plugin.sa_http_server_resp_new(r, 200, &resp) != 0) {
+        _ = plugin.sa_http_server_req_free(r);
+        return;
+    }
+    const body = "threaded-ok";
+    _ = plugin.sa_http_server_resp_send(resp, body.ptr, body.len);
+    _ = plugin.sa_http_server_resp_free(resp);
+    _ = plugin.sa_http_server_req_free(r);
+    _ = st.count.fetchAdd(1, .acq_rel);
+}
+
+const ThreadedServeArgs = struct { server: ?*anyopaque, state: *ThreadedState };
+
+fn threadedServeFn(args: ThreadedServeArgs) void {
+    _ = plugin.sa_http_server_serve_threaded(args.server, 4, threadedHandler, @ptrCast(args.state), 0);
+}
+
+const ThreadedClientArgs = struct { port: u16, n: usize, ok: *std.atomic.Value(u64) };
+
+fn threadedClientFn(args: ThreadedClientArgs) void {
+    var i: usize = 0;
+    while (i < args.n) : (i += 1) {
+        var stream = connectEventually(args.port) catch return;
+        stream.writeAll("GET /t HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n") catch {
+            stream.close();
+            return;
+        };
+        var buf: [512]u8 = undefined;
+        const n = readUntilEof(stream, &buf) catch {
+            stream.close();
+            return;
+        };
+        stream.close();
+        if (std.mem.indexOf(u8, buf[0..n], "threaded-ok") != null) _ = args.ok.fetchAdd(1, .acq_rel);
+    }
+}
+
+test "http server serve_threaded runs a fixed worker pool for concurrent clients" {
+    const port: u16 = 18094;
+    const server = try startV1Server(port);
+    // stop_serving shuts the listener down, so no defer-free before join.
+    var state = ThreadedState{};
+    const serve_thread = try std.Thread.spawn(.{}, threadedServeFn, .{ThreadedServeArgs{ .server = server, .state = &state }});
+    std.time.sleep(100 * std.time.ns_per_ms); // let the pool start accepting
+
+    var ok = std.atomic.Value(u64).init(0);
+    const nclients = 8;
+    const per_client = 10;
+    var clients: [nclients]std.Thread = undefined;
+    for (&clients) |*t| t.* = try std.Thread.spawn(.{}, threadedClientFn, .{ThreadedClientArgs{ .port = port, .n = per_client, .ok = &ok }});
+    for (&clients) |*t| t.join();
+
+    try std.testing.expectEqual(@as(u64, nclients * per_client), ok.load(.acquire));
+    try std.testing.expectEqual(@as(u32, 0), plugin.sa_http_server_stop_serving(server));
+    serve_thread.join();
+    try std.testing.expectEqual(@as(u64, nclients * per_client), state.count.load(.acquire));
+    _ = plugin.sa_http_server_free(server);
+}
+
+test "http server set_max_body_bytes enforces the v1 limit" {
+    const port: u16 = 18095;
+    const server = try startV1Server(port);
+    defer _ = plugin.sa_http_server_free(server);
+
+    const failed = @intFromEnum(plugin_api.AbiStatus.failed);
+    try std.testing.expectEqual(failed, plugin.sa_http_server_set_max_body_bytes(server, 0));
+    try std.testing.expectEqual(failed, plugin.sa_http_server_set_max_body_bytes(server, 2 * 1024 * 1024 * 1024));
+    try std.testing.expectEqual(@as(u32, 0), plugin.sa_http_server_set_max_body_bytes(server, 16));
+
+    // Two accept attempts: the oversize one fails, the small one succeeds.
+    const serve_thread = try std.Thread.spawn(.{}, serveN, .{ServeNArgs{ .server = server, .n = 2 }});
+    defer serve_thread.join();
+
+    var big = try connectEventually(port);
+    try big.writeAll("POST /big HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 100\r\nConnection: close\r\n\r\n" ++ "x" ** 100);
+    var bbuf: [64]u8 = undefined;
+    try std.testing.expectEqual(@as(usize, 0), try big.read(&bbuf)); // closed, no response
+    big.close();
+
+    var small = try connectEventually(port);
+    defer small.close();
+    try small.writeAll("POST /small HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello");
+    var sbuf: [512]u8 = undefined;
+    const sn = try readFullResponse(small, &sbuf);
+    try std.testing.expect(std.mem.indexOf(u8, sbuf[0..sn], "bodylen=5") != null);
+}
