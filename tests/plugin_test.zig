@@ -724,3 +724,242 @@ test "http server v2 websocket reports and recovers from bounded backpressure" {
     try std.testing.expect(client_state.handshake_ok);
     try std.testing.expect(client_state.bytes_read >= backpressure_payload_bytes);
 }
+
+// ---- keep-alive / flush / thread-pool / body-limit tests (P0+P1) ----
+
+fn readFullResponse(stream: std.net.Stream, buf: []u8) !usize {
+    var total: usize = 0;
+    var header_end: ?usize = null;
+    var content_len: usize = 0;
+    while (true) {
+        if (total >= buf.len) return error.BufferTooSmall;
+        const n = try stream.read(buf[total..]);
+        if (n == 0) return error.Closed;
+        total += n;
+        if (header_end == null) {
+            if (std.mem.indexOf(u8, buf[0..total], "\r\n\r\n")) |idx| {
+                header_end = idx + 4;
+                const head = buf[0..idx];
+                if (std.mem.indexOf(u8, head, "content-length:")) |cl| {
+                    const rest = head[cl + "content-length:".len ..];
+                    const eol = std.mem.indexOfScalar(u8, rest, '\r') orelse rest.len;
+                    content_len = std.fmt.parseInt(usize, std.mem.trim(u8, rest[0..eol], " \t"), 10) catch 0;
+                }
+            }
+        }
+        if (header_end) |he| {
+            if (total >= he + content_len) return total;
+        }
+    }
+}
+
+fn readUntilEof(stream: std.net.Stream, buf: []u8) !usize {
+    var total: usize = 0;
+    while (total < buf.len) {
+        const n = try stream.read(buf[total..]);
+        if (n == 0) break;
+        total += n;
+    }
+    return total;
+}
+
+fn setRecvTimeoutMs(stream: std.net.Stream, ms: u32) void {
+    const tv = std.posix.timeval{
+        .sec = @intCast(ms / 1000),
+        .usec = @intCast((ms % 1000) * 1000),
+    };
+    std.posix.setsockopt(stream.handle, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, std.mem.asBytes(&tv)) catch {};
+}
+
+/// Accept one request and respond "path=<path> bodylen=<n>". Returns false
+/// when accept itself failed (e.g. oversize body was rejected).
+fn serveOne(server: ?*anyopaque) bool {
+    var req: ?*anyopaque = null;
+    if (plugin.sa_http_server_accept(server, &req) != 0) return false;
+    var path_ptr: ?[*]const u8 = null;
+    var path_len: u64 = 0;
+    _ = plugin.sa_http_server_req_get_path(req, &path_ptr, &path_len);
+    var body_ptr: ?[*]const u8 = null;
+    var body_len: u64 = 0;
+    _ = plugin.sa_http_server_req_get_body(req, &body_ptr, &body_len);
+    var resp: ?*anyopaque = null;
+    if (plugin.sa_http_server_resp_new(req, 200, &resp) != 0) {
+        _ = plugin.sa_http_server_req_free(req);
+        return true;
+    }
+    var out: [256]u8 = undefined;
+    const path = if (path_ptr) |p| p[0..@intCast(path_len)] else "";
+    const msg = std.fmt.bufPrint(&out, "path={s} bodylen={d}", .{ path, body_len }) catch "err";
+    _ = plugin.sa_http_server_resp_send(resp, msg.ptr, msg.len);
+    _ = plugin.sa_http_server_resp_free(resp);
+    _ = plugin.sa_http_server_req_free(req);
+    return true;
+}
+
+const ServeNArgs = struct { server: ?*anyopaque, n: usize };
+
+fn serveN(args: ServeNArgs) void {
+    var i: usize = 0;
+    while (i < args.n) : (i += 1) _ = serveOne(args.server);
+}
+
+fn startV1Server(port: u16) !?*anyopaque {
+    var server: ?*anyopaque = null;
+    try std.testing.expectEqual(@as(u32, 0), plugin.sa_http_server_new(&server));
+    errdefer _ = plugin.sa_http_server_free(server);
+    const host = "127.0.0.1";
+    try std.testing.expectEqual(@as(u32, 0), plugin.sa_http_server_start(server, host.ptr, host.len, port));
+    return server;
+}
+
+test "http server keep-alive serves sequential requests on one connection" {
+    const port: u16 = 18090;
+    const server = try startV1Server(port);
+    defer _ = plugin.sa_http_server_free(server);
+    const serve_thread = try std.Thread.spawn(.{}, serveN, .{ServeNArgs{ .server = server, .n = 2 }});
+    defer serve_thread.join();
+
+    var client = try connectEventually(port);
+    defer client.close();
+
+    var buf: [1024]u8 = undefined;
+    try client.writeAll("GET /one HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n");
+    const n1 = try readFullResponse(client, &buf);
+    try std.testing.expect(std.mem.indexOf(u8, buf[0..n1], "connection: keep-alive") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf[0..n1], "path=/one bodylen=0") != null);
+
+    // Second request reuses the same TCP connection.
+    try client.writeAll("GET /two HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n");
+    const n2 = try readFullResponse(client, &buf);
+    try std.testing.expect(std.mem.indexOf(u8, buf[0..n2], "connection: keep-alive") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf[0..n2], "path=/two bodylen=0") != null);
+}
+
+test "http server keep-alive carries POST bodies across requests" {
+    const port: u16 = 18091;
+    const server = try startV1Server(port);
+    defer _ = plugin.sa_http_server_free(server);
+    const serve_thread = try std.Thread.spawn(.{}, serveN, .{ServeNArgs{ .server = server, .n = 2 }});
+    defer serve_thread.join();
+
+    var client = try connectEventually(port);
+    defer client.close();
+
+    var buf: [1024]u8 = undefined;
+    try client.writeAll("POST /echo HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 5\r\n\r\nhello");
+    const n1 = try readFullResponse(client, &buf);
+    try std.testing.expect(std.mem.indexOf(u8, buf[0..n1], "path=/echo bodylen=5") != null);
+
+    try client.writeAll("GET /after HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n");
+    const n2 = try readFullResponse(client, &buf);
+    try std.testing.expect(std.mem.indexOf(u8, buf[0..n2], "path=/after bodylen=0") != null);
+}
+
+test "http server http10 defaults to close and http11 close header closes" {
+    const port: u16 = 18092;
+    const server = try startV1Server(port);
+    defer _ = plugin.sa_http_server_free(server);
+    const serve_thread = try std.Thread.spawn(.{}, serveN, .{ServeNArgs{ .server = server, .n = 2 }});
+    defer serve_thread.join();
+
+    var buf: [1024]u8 = undefined;
+
+    var c10 = try connectEventually(port);
+    try c10.writeAll("GET /ten HTTP/1.0\r\n\r\n");
+    const n10 = try readUntilEof(c10, &buf);
+    c10.close();
+    try std.testing.expect(std.mem.indexOf(u8, buf[0..n10], "connection: close") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf[0..n10], "path=/ten") != null);
+
+    var c11 = try connectEventually(port);
+    try c11.writeAll("GET /eleven HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n");
+    const n11 = try readUntilEof(c11, &buf);
+    c11.close();
+    try std.testing.expect(std.mem.indexOf(u8, buf[0..n11], "connection: close") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf[0..n11], "path=/eleven") != null);
+}
+
+const FlushState = struct {
+    server: ?*anyopaque,
+    chunk_written: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    do_flush: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    do_end: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    finished: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+};
+
+fn flushServerFn(state: *FlushState) void {
+    var req: ?*anyopaque = null;
+    if (plugin.sa_http_server_accept(state.server, &req) != 0) return;
+    var sresp: ?*anyopaque = null;
+    if (plugin.sa_http_server_resp_stream_new(req, 200, &sresp) != 0) {
+        _ = plugin.sa_http_server_req_free(req);
+        return;
+    }
+    const chunk = "data: one\n\n";
+    _ = plugin.sa_http_server_resp_stream_write(sresp, chunk.ptr, chunk.len);
+    state.chunk_written.store(true, .release);
+    while (!state.do_flush.load(.acquire)) std.time.sleep(1 * std.time.ns_per_ms);
+    _ = plugin.sa_http_server_resp_stream_flush(sresp);
+    while (!state.do_end.load(.acquire)) std.time.sleep(1 * std.time.ns_per_ms);
+    _ = plugin.sa_http_server_resp_stream_end(sresp);
+    _ = plugin.sa_http_server_resp_stream_free(sresp);
+    _ = plugin.sa_http_server_req_free(req);
+    // Chunked keep-alive: a second request must work on the same connection.
+    _ = serveOne(state.server);
+    state.finished.store(true, .release);
+}
+
+test "http server stream flush is real and chunked connections are reusable" {
+    const port: u16 = 18093;
+    const server = try startV1Server(port);
+    defer _ = plugin.sa_http_server_free(server);
+    var state = FlushState{ .server = server };
+    const serve_thread = try std.Thread.spawn(.{}, flushServerFn, .{&state});
+    defer serve_thread.join();
+
+    var client = try connectEventually(port);
+    defer client.close();
+    try client.writeAll("GET /sse HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n");
+
+    // Read the response head (sent eagerly by stream_new).
+    var head_buf: [1024]u8 = undefined;
+    var head_total: usize = 0;
+    while (std.mem.indexOf(u8, head_buf[0..head_total], "\r\n\r\n") == null) {
+        const n = try client.read(head_buf[head_total..]);
+        try std.testing.expect(n > 0);
+        head_total += n;
+    }
+    try std.testing.expect(std.mem.indexOf(u8, head_buf[0..head_total], "transfer-encoding: chunked") != null);
+    try std.testing.expect(std.mem.indexOf(u8, head_buf[0..head_total], "connection: keep-alive") != null);
+
+    // The server wrote a chunk but has not flushed: nothing may be on the wire.
+    while (!state.chunk_written.load(.acquire)) std.time.sleep(1 * std.time.ns_per_ms);
+    setRecvTimeoutMs(client, 300);
+    var probe: [64]u8 = undefined;
+    try std.testing.expectError(error.WouldBlock, client.read(&probe));
+
+    // After flush the chunk must arrive.
+    state.do_flush.store(true, .release);
+    var cbuf: [512]u8 = undefined;
+    var ctotal: usize = 0;
+    while (std.mem.indexOf(u8, cbuf[0..ctotal], "data: one") == null) {
+        const n = try client.read(cbuf[ctotal..]);
+        try std.testing.expect(n > 0);
+        ctotal += n;
+    }
+
+    // End the stream; the terminal chunk arrives but the connection stays open.
+    state.do_end.store(true, .release);
+    while (std.mem.indexOf(u8, cbuf[0..ctotal], "0\r\n\r\n") == null) {
+        const n = try client.read(cbuf[ctotal..]);
+        try std.testing.expect(n > 0);
+        ctotal += n;
+    }
+
+    setRecvTimeoutMs(client, 5000);
+    try client.writeAll("GET /after-stream HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n");
+    var rbuf: [1024]u8 = undefined;
+    const rn = try readFullResponse(client, &rbuf);
+    try std.testing.expect(std.mem.indexOf(u8, rbuf[0..rn], "path=/after-stream") != null);
+    while (!state.finished.load(.acquire)) std.time.sleep(1 * std.time.ns_per_ms);
+}

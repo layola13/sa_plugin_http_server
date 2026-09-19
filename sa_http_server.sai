@@ -22,6 +22,12 @@
 @extern sa_http_server_websocket_read(ws: ptr, max_len: u64, &out_opcode: ptr, &out_data: ptr, &out_len: ptr) -> u32
 @extern sa_http_server_websocket_write(ws: ptr, opcode: u8, &data: ptr, data_len: u64) -> u32
 @extern sa_http_server_websocket_free(ws: ptr) -> u32
+// Keep-alive: when the client negotiated keep-alive and a fully-framed
+// response was sent, req_free recycles the TCP connection for the next
+// request instead of closing it. Response Connection headers reflect this.
+// Streaming: resp_stream_write buffers (8KB auto-flush); resp_stream_flush
+// pushes buffered bytes to the socket for real; end terminates the chunked
+// stream. After a WebSocket upgrade the HTTP connection is consumed.
 
 // v2 network status: ok=0, would_block=1, closed=2, timeout=3,
 // too_large=4, invalid=5, io_error=6.

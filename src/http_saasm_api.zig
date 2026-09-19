@@ -107,10 +107,32 @@ pub export fn sa_http_server_req_get_body(req: ?*anyopaque, out_body_ptr: ?*?[*]
     return @intFromEnum(plugin_api.AbiStatus.ok);
 }
 
+/// Frees a request. When the client negotiated keep-alive AND a fully-framed
+/// response was sent, the TCP connection is recycled into the server's pool
+/// for the next request instead of being closed.
+fn recycleOrCloseRequest(request: *HttpRequest) void {
+    if (request.response_done and request.keep_alive) {
+        const srv = request.server;
+        const conn = request.conn;
+        // The client usually closes a connection-per-request socket right
+        // after reading the response; recycling it would only fill the idle
+        // pool with dead connections and slow every later accept to O(pool).
+        if (HttpServer.isPeerClosed(conn.http.connection.stream)) {
+            request.deinit();
+        } else {
+            request.freeResources();
+            request.allocator.destroy(request);
+            srv.pushRecycled(conn);
+        }
+    } else {
+        request.deinit();
+    }
+}
+
 pub export fn sa_http_server_req_free(req: ?*anyopaque) u32 {
     const req_ptr = req orelse return @intFromEnum(plugin_api.AbiStatus.failed);
     const request = @as(*HttpRequest, @ptrCast(@alignCast(req_ptr)));
-    request.deinit();
+    recycleOrCloseRequest(request);
     return @intFromEnum(plugin_api.AbiStatus.ok);
 }
 
@@ -221,7 +243,7 @@ pub export fn sa_http_server_websocket_upgrade(req: ?*anyopaque, out_ws: ?*?*any
         "HTTP/1.1 101 Switching Protocols\r\nupgrade: websocket\r\nconnection: Upgrade\r\nsec-websocket-accept: {s}\r\n\r\n",
         .{accept},
     ) catch return @intFromEnum(plugin_api.AbiStatus.failed);
-    request.connection.stream.writeAll(response) catch return @intFromEnum(plugin_api.AbiStatus.failed);
+    request.stream().writeAll(response) catch return @intFromEnum(plugin_api.AbiStatus.failed);
 
     const handle = WebSocketHandle.initFromRequest(request) catch return @intFromEnum(plugin_api.AbiStatus.failed);
     slot.* = @ptrCast(handle);
@@ -307,7 +329,7 @@ pub export fn sa_http_server_accept_v2(server: ?*anyopaque, timeout_ms: u32, out
 pub export fn sa_http_server_req_free_v2(req: ?*anyopaque) u32 {
     const req_ptr = req orelse return networkStatus(.invalid);
     const request = @as(*HttpRequest, @ptrCast(@alignCast(req_ptr)));
-    request.deinit();
+    recycleOrCloseRequest(request);
     return networkStatus(.ok);
 }
 
@@ -343,7 +365,7 @@ pub export fn sa_http_server_resp_send_v2(resp: ?*anyopaque, body_ptr: ?[*]const
         break :blk "";
     };
     const response = @as(*HttpResponse, @ptrCast(@alignCast(resp_ptr)));
-    const poll_status = core.pollStream(response.request.connection.stream, std.posix.POLL.OUT, timeout_ms, null);
+    const poll_status = core.pollStream(response.request.stream(), std.posix.POLL.OUT, timeout_ms, null);
     if (poll_status != .ok) return networkStatus(poll_status);
     response.send(body) catch |err| return networkStatus(core.statusFromError(err));
     return networkStatus(.ok);
@@ -389,7 +411,7 @@ pub export fn sa_http_server_resp_stream_write_v2(resp: ?*anyopaque, body_ptr: ?
     };
     const response = @as(*HttpStreamResponse, @ptrCast(@alignCast(resp_ptr)));
     if (response.ended) return networkStatus(.closed);
-    const poll_status = core.pollStream(response.request.connection.stream, std.posix.POLL.OUT, timeout_ms, null);
+    const poll_status = core.pollStream(response.request.stream(), std.posix.POLL.OUT, timeout_ms, null);
     if (poll_status != .ok) return networkStatus(poll_status);
     response.writeChunk(body) catch |err| return networkStatus(core.statusFromError(err));
     return networkStatus(.ok);
@@ -407,7 +429,7 @@ pub export fn sa_http_server_resp_stream_end_v2(resp: ?*anyopaque, timeout_ms: u
     const resp_ptr = resp orelse return networkStatus(.invalid);
     const response = @as(*HttpStreamResponse, @ptrCast(@alignCast(resp_ptr)));
     if (response.ended) return networkStatus(.closed);
-    const poll_status = core.pollStream(response.request.connection.stream, std.posix.POLL.OUT, timeout_ms, null);
+    const poll_status = core.pollStream(response.request.stream(), std.posix.POLL.OUT, timeout_ms, null);
     if (poll_status != .ok) return networkStatus(poll_status);
     response.endChunked() catch |err| return networkStatus(core.statusFromError(err));
     return networkStatus(.ok);
