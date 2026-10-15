@@ -141,14 +141,14 @@ const ResponseHeaderBag = struct {
     allocator: std.mem.Allocator,
     content_type: []const u8,
     owns_content_type: bool = false,
-    extra: std.ArrayList(Header),
+    extra: std.array_list.Managed(Header),
     byte_len: usize = 0,
 
     fn init(allocator: std.mem.Allocator, content_type: []const u8) ResponseHeaderBag {
         return .{
             .allocator = allocator,
             .content_type = content_type,
-            .extra = std.ArrayList(Header).init(allocator),
+            .extra = std.array_list.Managed(Header).init(allocator),
         };
     }
 
@@ -275,7 +275,7 @@ pub const HttpServer = struct {
     /// sa_http_server_set_max_body_bytes. v2 always uses 16MB.
     max_body_len: usize = 2 * 1024 * 1024,
     /// Idle keep-alive connections waiting for their next request.
-    recycled: std.ArrayList(*ConnState),
+    recycled: std.array_list.Managed(*ConnState),
     recycled_mutex: std.Thread.Mutex = .{},
     /// Self-pipe: pushRecycled writes a byte so an accept loop blocked in
     /// poll() wakes up immediately. Recycling is asynchronous (handler
@@ -302,7 +302,7 @@ pub const HttpServer = struct {
         self.* = .{
             .allocator = allocator,
             .server = null,
-            .recycled = std.ArrayList(*ConnState).init(allocator),
+            .recycled = std.array_list.Managed(*ConnState).init(allocator),
             .wake_pipe = pipe,
         };
         return self;
@@ -562,13 +562,13 @@ pub const HttpServer = struct {
     /// batch, so the cost stays flat no matter how many idle connections sit
     /// in the pool.
     fn drainRecycled(self: *HttpServer, max_body_len: usize, post_parse_timeout: ?u32) ?*HttpRequest {
-        var conns = std.ArrayList(*ConnState).init(self.allocator);
+        var conns = std.array_list.Managed(*ConnState).init(self.allocator);
         {
             self.recycled_mutex.lock();
             defer self.recycled_mutex.unlock();
-            std.mem.swap(std.ArrayList(*ConnState), &self.recycled, &conns);
+            std.mem.swap(std.array_list.Managed(*ConnState), &self.recycled, &conns);
         }
-        var keep = std.ArrayList(*ConnState).init(self.allocator);
+        var keep = std.array_list.Managed(*ConnState).init(self.allocator);
         defer keep.deinit();
         var result: ?*HttpRequest = null;
 
@@ -719,7 +719,7 @@ pub const HttpServer = struct {
         const target = try self.allocator.dupe(u8, std_request.head.target);
         errdefer self.allocator.free(target);
 
-        var headers = std.ArrayList(Header).init(self.allocator);
+        var headers = std.array_list.Managed(Header).init(self.allocator);
         errdefer headers.deinit();
         var it = std_request.iterateHeaders();
         while (it.next()) |header| {
@@ -729,7 +729,7 @@ pub const HttpServer = struct {
             });
         }
 
-        var body = std.ArrayList(u8).init(self.allocator);
+        var body = std.array_list.Managed(u8).init(self.allocator);
         errdefer body.deinit();
         if (content_length > 0) {
             if (content_length > max_body_len) return error.BodyTooLarge;
@@ -913,7 +913,7 @@ pub const HttpResponse = struct {
 
     pub fn send(self: *HttpResponse, body: []const u8) !void {
         if (self.sent) return error.ResponseAlreadySent;
-        var head = std.ArrayList(u8).init(self.allocator);
+        var head = std.array_list.Managed(u8).init(self.allocator);
         defer head.deinit();
         const writer = head.writer();
         try writer.print("HTTP/1.1 {d} {s}\r\ncontent-length: {d}\r\n", .{ self.status, statusText(self.status), body.len });
@@ -950,7 +950,7 @@ pub const HttpStreamResponse = struct {
     /// real operation: without it, bytes may sit in this buffer.
     /// Semantics: writeChunk alone does NOT guarantee delivery; call flush()
     /// (or end the stream) to push.
-    out_buffer: std.ArrayList(u8),
+    out_buffer: std.array_list.Managed(u8),
 
     pub fn init(request: *HttpRequest, status: u16) !*HttpStreamResponse {
         const self = try initDeferred(request, status);
@@ -969,7 +969,7 @@ pub const HttpStreamResponse = struct {
             .headers = ResponseHeaderBag.init(request.allocator, "text/event-stream"),
             .sent_head = false,
             .ended = false,
-            .out_buffer = std.ArrayList(u8).init(request.allocator),
+            .out_buffer = std.array_list.Managed(u8).init(request.allocator),
         };
         return self;
     }
@@ -981,7 +981,7 @@ pub const HttpStreamResponse = struct {
 
     pub fn sendHead(self: *HttpStreamResponse, status: u16) !void {
         if (self.sent_head) return;
-        var head = std.ArrayList(u8).init(self.allocator);
+        var head = std.array_list.Managed(u8).init(self.allocator);
         defer head.deinit();
         const writer = head.writer();
         try writer.print("HTTP/1.1 {d} {s}\r\n", .{ status, statusText(status) });
@@ -1039,8 +1039,8 @@ pub const WebSocketHandle = struct {
     allocator: std.mem.Allocator,
     stream: std.net.Stream,
     last_message: ?[]u8 = null,
-    incoming: std.ArrayList(u8),
-    fragmented: std.ArrayList(u8),
+    incoming: std.array_list.Managed(u8),
+    fragmented: std.array_list.Managed(u8),
     fragmented_opcode: ?u8 = null,
     pending_write: ?[]u8 = null,
     pending_offset: usize = 0,
@@ -1056,8 +1056,8 @@ pub const WebSocketHandle = struct {
             // Takes over the TCP stream; the HTTP connection is consumed and
             // never recycled for keep-alive.
             .stream = request.releaseStream(),
-            .incoming = std.ArrayList(u8).init(request.allocator),
-            .fragmented = std.ArrayList(u8).init(request.allocator),
+            .incoming = std.array_list.Managed(u8).init(request.allocator),
+            .fragmented = std.array_list.Managed(u8).init(request.allocator),
         };
         return self;
     }
@@ -1399,7 +1399,7 @@ pub fn readFrameV2(handle: *WebSocketHandle, max_len_u64: u64, out_opcode: *u8, 
                     if (frame.payload.len != 0) handle.allocator.free(frame.payload);
                     if (frame.fin) {
                         const message = handle.fragmented.toOwnedSlice() catch return .io_error;
-                        handle.fragmented = std.ArrayList(u8).init(handle.allocator);
+                        handle.fragmented = std.array_list.Managed(u8).init(handle.allocator);
                         handle.fragmented_opcode = null;
                         if (opcode == @intFromEnum(WebSocketOpcode.text) and !std.unicode.utf8ValidateSlice(message)) {
                             if (message.len != 0) handle.allocator.free(message);

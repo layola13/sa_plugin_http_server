@@ -2,7 +2,66 @@ const std = @import("std");
 const plugin_api = @import("plugin_api");
 const plugin_helpers = @import("plugin_helpers.zig");
 const http_server_interface = @import("http_server_interface");
-pub usingnamespace @import("http_saasm_api.zig");
+const _http_api = @import("http_saasm_api.zig");
+// NOTE(Zig 0.17): `usingnamespace` was removed; explicit re-exports preserve plugin.* ABI.
+pub const HttpServer = _http_api.HttpServer;
+pub const HttpRequest = _http_api.HttpRequest;
+pub const HttpResponse = _http_api.HttpResponse;
+pub const HttpStreamResponse = _http_api.HttpStreamResponse;
+pub const WebSocketHandle = _http_api.WebSocketHandle;
+pub const NetworkStatus = _http_api.NetworkStatus;
+pub const PollEvent = _http_api.PollEvent;
+pub const max_v2_message_bytes = _http_api.max_v2_message_bytes;
+pub const SaHttpServerHandle = _http_api.SaHttpServerHandle;
+pub const SaHttpRequestHandle = _http_api.SaHttpRequestHandle;
+pub const SaHttpResponseHandle = _http_api.SaHttpResponseHandle;
+pub const SaHttpStreamResponseHandle = _http_api.SaHttpStreamResponseHandle;
+pub const sa_http_server_new = _http_api.sa_http_server_new;
+pub const sa_http_server_start = _http_api.sa_http_server_start;
+pub const sa_http_server_accept = _http_api.sa_http_server_accept;
+pub const sa_http_server_req_get_method = _http_api.sa_http_server_req_get_method;
+pub const sa_http_server_req_get_path = _http_api.sa_http_server_req_get_path;
+pub const sa_http_server_req_get_header = _http_api.sa_http_server_req_get_header;
+pub const sa_http_server_req_get_body = _http_api.sa_http_server_req_get_body;
+pub const sa_http_server_req_free = _http_api.sa_http_server_req_free;
+pub const sa_http_server_resp_new = _http_api.sa_http_server_resp_new;
+pub const sa_http_server_resp_send = _http_api.sa_http_server_resp_send;
+pub const sa_http_server_resp_set_content_type = _http_api.sa_http_server_resp_set_content_type;
+pub const sa_http_server_resp_free = _http_api.sa_http_server_resp_free;
+pub const sa_http_server_resp_stream_new = _http_api.sa_http_server_resp_stream_new;
+pub const sa_http_server_resp_stream_write = _http_api.sa_http_server_resp_stream_write;
+pub const sa_http_server_resp_stream_flush = _http_api.sa_http_server_resp_stream_flush;
+pub const sa_http_server_resp_stream_end = _http_api.sa_http_server_resp_stream_end;
+pub const sa_http_server_resp_stream_free = _http_api.sa_http_server_resp_stream_free;
+pub const sa_http_server_free = _http_api.sa_http_server_free;
+pub const sa_http_server_set_max_body_bytes = _http_api.sa_http_server_set_max_body_bytes;
+pub const sa_http_server_serve_threaded = _http_api.sa_http_server_serve_threaded;
+pub const sa_http_server_stop_serving = _http_api.sa_http_server_stop_serving;
+pub const sa_http_server_websocket_upgrade = _http_api.sa_http_server_websocket_upgrade;
+pub const sa_http_server_websocket_read = _http_api.sa_http_server_websocket_read;
+pub const sa_http_server_websocket_write = _http_api.sa_http_server_websocket_write;
+pub const sa_http_server_websocket_free = _http_api.sa_http_server_websocket_free;
+pub const sa_http_server_new_v2 = _http_api.sa_http_server_new_v2;
+pub const sa_http_server_start_v2 = _http_api.sa_http_server_start_v2;
+pub const sa_http_server_accept_v2 = _http_api.sa_http_server_accept_v2;
+pub const sa_http_server_req_free_v2 = _http_api.sa_http_server_req_free_v2;
+pub const sa_http_server_resp_new_v2 = _http_api.sa_http_server_resp_new_v2;
+pub const sa_http_server_resp_add_header_v2 = _http_api.sa_http_server_resp_add_header_v2;
+pub const sa_http_server_resp_send_v2 = _http_api.sa_http_server_resp_send_v2;
+pub const sa_http_server_resp_free_v2 = _http_api.sa_http_server_resp_free_v2;
+pub const sa_http_server_resp_stream_new_v2 = _http_api.sa_http_server_resp_stream_new_v2;
+pub const sa_http_server_resp_stream_add_header_v2 = _http_api.sa_http_server_resp_stream_add_header_v2;
+pub const sa_http_server_resp_stream_write_v2 = _http_api.sa_http_server_resp_stream_write_v2;
+pub const sa_http_server_resp_stream_flush_v2 = _http_api.sa_http_server_resp_stream_flush_v2;
+pub const sa_http_server_resp_stream_end_v2 = _http_api.sa_http_server_resp_stream_end_v2;
+pub const sa_http_server_resp_stream_free_v2 = _http_api.sa_http_server_resp_stream_free_v2;
+pub const sa_http_server_free_v2 = _http_api.sa_http_server_free_v2;
+pub const sa_http_server_websocket_upgrade_v2 = _http_api.sa_http_server_websocket_upgrade_v2;
+pub const sa_http_server_websocket_poll_v2 = _http_api.sa_http_server_websocket_poll_v2;
+pub const sa_http_server_websocket_read_v2 = _http_api.sa_http_server_websocket_read_v2;
+pub const sa_http_server_websocket_write_v2 = _http_api.sa_http_server_websocket_write_v2;
+pub const sa_http_server_websocket_close_v2 = _http_api.sa_http_server_websocket_close_v2;
+pub const sa_http_server_websocket_free_v2 = _http_api.sa_http_server_websocket_free_v2;
 
 pub const interface_source = http_server_interface.source;
 
@@ -21,13 +80,15 @@ const skills = [_]plugin_api.SkillSection{
     },
 };
 
+const sio = @import("sio");
+
 pub fn ensureDir(path: []const u8) !void {
-    if (path.len != 0) try std.fs.cwd().makePath(path);
+    if (path.len != 0) try sio.cwd().makePath(path);
 }
 
 pub fn writeFile(path: []const u8, bytes: []const u8) !void {
     if (std.fs.path.dirname(path)) |dir| try ensureDir(dir);
-    var file = try std.fs.cwd().createFile(path, .{ .truncate = true });
+    var file = try sio.cwd().createFile(path, .{ .truncate = true });
     defer file.close();
     try file.writeAll(bytes);
 }
@@ -37,82 +98,80 @@ pub fn requestPath(target: []const u8) []const u8 {
     return target;
 }
 
-pub fn headerValue(request: *std.http.Server.Request, name: []const u8) ?[]const u8 {
-    var it = request.iterateHeaders();
-    while (it.next()) |header| {
-        if (std.ascii.eqlIgnoreCase(header.name, name)) return header.value;
-    }
-    return null;
+fn writeHttpResponse(writer: *std.Io.Writer, status: u16, reason: []const u8, content_type: []const u8, body: []const u8) !void {
+    try writer.print("HTTP/1.1 {d} {s}\r\ncontent-type: {s}\r\ncontent-length: {d}\r\nconnection: close\r\n\r\n", .{ status, reason, content_type, body.len });
+    if (body.len > 0) try writer.writeAll(body);
+    try writer.flush();
 }
 
-pub fn readRequestBodyAlloc(ctx: *const plugin_api.Context, request: *std.http.Server.Request) ![]u8 {
-    var body = std.ArrayList(u8).init(ctx.allocator);
-    errdefer body.deinit();
-    const reader = try request.reader();
-    try reader.readAllArrayList(&body, 2 * 1024 * 1024);
-    return body.toOwnedSlice();
-}
-
-pub fn respondStreamed(request: *std.http.Server.Request, send_buffer: []u8, chunks: []const []const u8) !void {
-    var response = request.respondStreaming(.{
-        .send_buffer = send_buffer,
-        .respond_options = .{
-            .status = .ok,
-            .extra_headers = &.{
-                .{ .name = "content-type", .value = "text/event-stream" },
-            },
-            .transfer_encoding = .chunked,
-        },
-    });
-    for (chunks, 0..) |chunk, idx| {
-        try response.writeAll(chunk);
-        try response.flush();
-        if (idx + 1 < chunks.len) std.time.sleep(10 * std.time.ns_per_ms);
-    }
-    try response.endChunked(.{});
-}
-
-pub fn handleRoute(
-    ctx: *const plugin_api.Context,
-    request: *std.http.Server.Request,
-    stdout: std.io.AnyWriter,
-    stderr: std.io.AnyWriter,
-) !void {
-    const path = requestPath(request.head.target);
-    const content_type = headerValue(request, "content-type") orelse "";
-
+fn handleRawRoute(path: []const u8, body: []const u8, content_type: []const u8, writer: *std.Io.Writer, stdout: *std.Io.Writer, stderr: *std.Io.Writer) !void {
     if (std.mem.eql(u8, path, "/echo")) {
-        const body = try readRequestBodyAlloc(ctx, request);
-        defer ctx.allocator.free(body);
-        try request.respond(body, .{
-            .status = .ok,
-            .extra_headers = if (content_type.len == 0) &.{} else &.{.{ .name = "content-type", .value = content_type }},
-        });
+        const ct = if (content_type.len == 0) "application/octet-stream" else content_type;
+        try writeHttpResponse(writer, 200, "OK", ct, body);
         try stdout.print("route=echo path={s} body={d}\n", .{ path, body.len });
         return;
     }
-
     if (std.mem.eql(u8, path, "/stream")) {
-        var send_buffer: [2048]u8 = undefined;
-        try respondStreamed(request, &send_buffer, &.{
-            "data: first\n\n",
-            "data: second\n\n",
-        });
+        try writer.print("HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ntransfer-encoding: chunked\r\nconnection: close\r\n\r\n", .{});
+        for ([_][]const u8{ "data: first\n\n", "data: second\n\n" }) |chunk| {
+            try writer.print("{x}\r\n", .{chunk.len});
+            try writer.writeAll(chunk);
+            try writer.print("\r\n", .{});
+            try writer.flush();
+        }
+        try writer.writeAll("0\r\n\r\n");
+        try writer.flush();
         try stdout.print("route=stream path={s}\n", .{path});
         return;
     }
-
     const not_found = "not found\n";
-    try request.respond(not_found, .{
-        .status = .not_found,
-        .extra_headers = &.{
-            .{ .name = "content-type", .value = "text/plain" },
-        },
-    });
+    try writeHttpResponse(writer, 404, "Not Found", "text/plain", not_found);
     try stderr.print("error: unknown route {s}\n", .{path});
 }
 
-pub fn runServeCommand(ctx: *const plugin_api.Context, argv: []const []const u8, stdout: std.io.AnyWriter, stderr: std.io.AnyWriter) anyerror!?u8 {
+fn readHttpRequest(allocator: std.mem.Allocator, reader: *std.Io.net.Stream.Reader) !struct { target: []u8, content_type: []u8, body: []u8 } {
+    var head = std.Io.Writer.Allocating.init(allocator);
+    defer head.deinit();
+    // Read until end of headers.
+    while (true) {
+        const chunk = try reader.interface.take(1);
+        try head.writer.writeAll(chunk);
+        if (head.written().len > 64 * 1024) return error.InvalidPath;
+        if (head.written().len >= 4 and std.mem.endsWith(u8, head.written(), "\r\n\r\n")) break;
+    }
+    const head_bytes = head.written();
+    var lines = std.mem.splitSequence(u8, head_bytes, "\r\n");
+    const request_line = lines.next() orelse return error.InvalidPath;
+    var parts = std.mem.splitScalar(u8, request_line, ' ');
+    _ = parts.next() orelse return error.InvalidPath; // method
+    const target_raw = parts.next() orelse return error.InvalidPath;
+    const target = try allocator.dupe(u8, requestPath(target_raw));
+    errdefer allocator.free(target);
+    var content_type: []u8 = try allocator.dupe(u8, "");
+    errdefer allocator.free(content_type);
+    var content_len: usize = 0;
+    while (lines.next()) |line| {
+        if (line.len == 0) break;
+        if (std.ascii.startsWithIgnoreCase(line, "content-type:")) {
+            allocator.free(content_type);
+            content_type = try allocator.dupe(u8, std.mem.trim(u8, line["content-type:".len..], " \t"));
+        } else if (std.ascii.startsWithIgnoreCase(line, "content-length:")) {
+            content_len = std.fmt.parseInt(usize, std.mem.trim(u8, line["content-length:".len..], " \t"), 10) catch 0;
+        }
+    }
+    if (content_len > 2 * 1024 * 1024) return error.InvalidPath;
+    var body: []u8 = try allocator.alloc(u8, content_len);
+    errdefer allocator.free(body);
+    var off: usize = 0;
+    while (off < content_len) {
+        const n = try reader.interface.readSliceShort(body[off..]);
+        if (n == 0) return error.InvalidPath;
+        off += n;
+    }
+    return .{ .target = target, .content_type = content_type, .body = body };
+}
+
+pub fn runServeCommand(ctx: *const plugin_api.Context, argv: []const []const u8, stdout: *std.Io.Writer, stderr: *std.Io.Writer) anyerror!?u8 {
     if (argv.len < 2) return null;
     if (!std.mem.eql(u8, argv[1], "http-server")) return null;
     if (argv.len < 5) return error.MissingSourcePath;
@@ -126,23 +185,33 @@ pub fn runServeCommand(ctx: *const plugin_api.Context, argv: []const []const u8,
     if (argv.len >= 6) {
         max_requests = std.fmt.parseInt(usize, argv[5], 10) catch return error.InvalidPath;
     }
-    const address = std.net.Address.parseIp(host, port) catch return error.InvalidPath;
-    var server = try address.listen(.{ .reuse_address = true });
-    defer server.deinit();
+    // NOTE(Zig 0.17): std.net/std.http.Server removed; minimal Io.net HTTP/1.1 server.
+    const io = sio.io();
+    var address = std.Io.net.IpAddress.parse(host, port) catch return error.InvalidPath;
+    var server = address.listen(io, .{ .reuse_address = true }) catch return error.InvalidPath;
+    defer server.deinit(io);
 
     var served: usize = 0;
     while (max_requests == null or served < max_requests.?) {
-        var accepted = try server.accept();
-        defer accepted.stream.close();
+        const stream = server.accept(io) catch |err| {
+            try stderr.print("error: accept failed: {}\n", .{err});
+            return 1;
+        };
+        defer stream.close(io);
 
-        var request_buffer: [4096]u8 = undefined;
-        var http_server = std.http.Server.init(accepted, &request_buffer);
-        var request = http_server.receiveHead() catch |err| {
+        var read_buf: [8192]u8 = undefined;
+        var s_reader = stream.reader(io, &read_buf);
+        var write_buf: [8192]u8 = undefined;
+        var s_writer = stream.writer(io, &write_buf);
+        const req = readHttpRequest(ctx.allocator, &s_reader) catch |err| {
             try stderr.print("error: receive head failed: {}\n", .{err});
             return 1;
         };
+        defer ctx.allocator.free(req.target);
+        defer ctx.allocator.free(req.content_type);
+        defer ctx.allocator.free(req.body);
 
-        handleRoute(ctx, &request, stdout, stderr) catch |err| {
+        handleRawRoute(req.target, req.body, req.content_type, &s_writer.interface, stdout, stderr) catch |err| {
             try stderr.print("error: request handling failed: {}\n", .{err});
             return 1;
         };
@@ -151,7 +220,7 @@ pub fn runServeCommand(ctx: *const plugin_api.Context, argv: []const []const u8,
     return 0;
 }
 
-pub fn runHttpServerCommand(ctx: *const plugin_api.Context, argv: []const []const u8, stdout: std.io.AnyWriter, stderr: std.io.AnyWriter) anyerror!?u8 {
+pub fn runHttpServerCommand(ctx: *const plugin_api.Context, argv: []const []const u8, stdout: *std.Io.Writer, stderr: *std.Io.Writer) anyerror!?u8 {
     if (argv.len < 2) return null;
     if (!std.mem.eql(u8, argv[1], "http-server")) return null;
     if (argv.len < 3) return error.MissingSourcePath;
@@ -225,7 +294,7 @@ fn httpServerCliHint(argv: []const []const u8, err: anyerror) []const u8 {
     };
 }
 
-fn writeHttpServerCliError(writer: std.io.AnyWriter, argv: []const []const u8, err: anyerror) !void {
+fn writeHttpServerCliError(writer: *std.Io.Writer, argv: []const []const u8, err: anyerror) !void {
     const message = switch (err) {
         error.MissingSourcePath => "missing required HTTP server operand",
         error.UnknownCommand => "unknown HTTP server subcommand",

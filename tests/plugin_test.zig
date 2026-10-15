@@ -3,7 +3,7 @@ const plugin = @import("plugin");
 const plugin_api = @import("plugin_api");
 
 const CaptureStream = struct {
-    buffer: *std.ArrayList(u8),
+    buffer: *std.array_list.Managed(u8),
 };
 
 fn captureWriteAll(ctx: ?*anyopaque, bytes: [*]const u8, len: usize) callconv(.c) u32 {
@@ -37,9 +37,9 @@ fn freeZArgs(allocator: std.mem.Allocator, argv: [][*:0]const u8) void {
 
 test "http server plugin abi maps missing serve port to cli diagnostic" {
     var ctx = plugin_api.Context{ .allocator = std.testing.allocator };
-    var stdout_buf = std.ArrayList(u8).init(std.testing.allocator);
+    var stdout_buf = std.array_list.Managed(u8).init(std.testing.allocator);
     defer stdout_buf.deinit();
-    var stderr_buf = std.ArrayList(u8).init(std.testing.allocator);
+    var stderr_buf = std.array_list.Managed(u8).init(std.testing.allocator);
     defer stderr_buf.deinit();
     var stdout_ctx = CaptureStream{ .buffer = &stdout_buf };
     var stderr_ctx = CaptureStream{ .buffer = &stderr_buf };
@@ -83,9 +83,9 @@ test "http server plugin exports runtime descriptor and scaffold entry" {
     try tmp.dir.setAsCwd();
     defer original_cwd.setAsCwd() catch {};
 
-    var stdout_buf = std.ArrayList(u8).init(std.testing.allocator);
+    var stdout_buf = std.array_list.Managed(u8).init(std.testing.allocator);
     defer stdout_buf.deinit();
-    var stderr_buf = std.ArrayList(u8).init(std.testing.allocator);
+    var stderr_buf = std.array_list.Managed(u8).init(std.testing.allocator);
     defer stderr_buf.deinit();
 
     const argv = [_][]const u8{ "sa", "http-server", "scaffold", "scaffold-out" };
@@ -273,9 +273,9 @@ test "http server saasm api accepts null pointer for zero-length body" {
 }
 
 test "http server plugin serve responds on a local loopback socket" {
-    var stdout_buf = std.ArrayList(u8).init(std.testing.allocator);
+    var stdout_buf = std.array_list.Managed(u8).init(std.testing.allocator);
     defer stdout_buf.deinit();
-    var stderr_buf = std.ArrayList(u8).init(std.testing.allocator);
+    var stderr_buf = std.array_list.Managed(u8).init(std.testing.allocator);
     defer stderr_buf.deinit();
 
     const port: u16 = 18080;
@@ -315,9 +315,9 @@ test "http server plugin serve responds on a local loopback socket" {
 }
 
 test "http server plugin stream route returns chunked SSE body" {
-    var stdout_buf = std.ArrayList(u8).init(std.testing.allocator);
+    var stdout_buf = std.array_list.Managed(u8).init(std.testing.allocator);
     defer stdout_buf.deinit();
-    var stderr_buf = std.ArrayList(u8).init(std.testing.allocator);
+    var stderr_buf = std.array_list.Managed(u8).init(std.testing.allocator);
     defer stderr_buf.deinit();
 
     const port: u16 = 18081;
@@ -1046,7 +1046,7 @@ test "http server set_max_body_bytes enforces the v1 limit" {
     defer serve_thread.join();
 
     var big = try connectEventually(port);
-    try big.writeAll("POST /big HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 100\r\nConnection: close\r\n\r\n" ++ "x" ** 100);
+    try big.writeAll("POST /big HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 100\r\nConnection: close\r\n\r\n" ++ ("x"**100));
     var bbuf: [64]u8 = undefined;
     try std.testing.expectEqual(@as(usize, 0), try big.read(&bbuf)); // closed, no response
     big.close();
