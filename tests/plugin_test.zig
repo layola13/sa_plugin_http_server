@@ -41,7 +41,11 @@ fn streamWriteAll(s: TestStream, bytes: []const u8) !void {
 fn streamRead(s: TestStream, buf: []u8) !usize {
     const rc = std.c.read(s.socket.handle, buf.ptr, buf.len);
     if (rc == 0) return 0;
-    if (rc < 0) return error.ConnectionResetByPeer;
+    if (rc < 0) {
+        const e = std.c.errno(rc);
+        if (e == .AGAIN) return error.WouldBlock;
+        return error.ConnectionResetByPeer;
+    }
     return @intCast(rc);
 }
 

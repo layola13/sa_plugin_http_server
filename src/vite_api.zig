@@ -846,7 +846,9 @@ pub const HttpServer = struct {
             try body.appendSlice(conn.read_buffer[body_start..reader_need]);
             conn.request_start = reader_need;
         } else if (supports_reuse) {
-            // No body: nothing to drain; keep buffered bytes as-is.
+            // No body: advance past the parsed head so the next accept on
+            // this recycled connection parses the NEXT request, not this one.
+            conn.request_start = body_start;
         }
 
         request.* = .{
