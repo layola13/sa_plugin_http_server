@@ -322,9 +322,13 @@ pub fn runHttpServerCommandAbi(ctx: *const plugin_api.Context, argv: [*]const [*
     const result = runHttpServerCommand(ctx, args, stdout_writer, stderr_writer) catch |err| {
         if (!isHttpServerCliError(err)) return @intFromEnum(plugin_api.AbiStatus.failed);
         writeHttpServerCliError(stderr_writer, args, err) catch return @intFromEnum(plugin_api.AbiStatus.failed);
+        stdout_writer.flush() catch return @intFromEnum(plugin_api.AbiStatus.failed);
+        stderr_writer.flush() catch return @intFromEnum(plugin_api.AbiStatus.failed);
         out_code.* = 1;
         return @intFromEnum(plugin_api.AbiStatus.ok);
     };
+    stdout_writer.flush() catch return @intFromEnum(plugin_api.AbiStatus.failed);
+    stderr_writer.flush() catch return @intFromEnum(plugin_api.AbiStatus.failed);
     if (result) |code| {
         out_code.* = code;
         return @intFromEnum(plugin_api.AbiStatus.ok);

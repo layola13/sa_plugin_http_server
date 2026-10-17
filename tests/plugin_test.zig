@@ -141,6 +141,8 @@ test "http server plugin exports runtime descriptor and scaffold entry" {
         stdout_fw.writer(),
         stderr_fw.writer(),
     );
+    try stdout_fw.writer().flush();
+    try stderr_fw.writer().flush();
 
     try std.testing.expectEqual(@as(?u8, 0), code);
     try std.testing.expectEqualStrings("scaffold-out\n", stdout_buf.items);
@@ -361,6 +363,8 @@ test "http server plugin serve responds on a local loopback socket" {
     try std.testing.expect(std.mem.indexOf(u8, response_buf[0..n], "hello") != null);
 
     serve_thread.join();
+    try stdout_fw.writer().flush();
+    try stderr_fw.writer().flush();
     try std.testing.expectEqualStrings("route=echo path=/echo body=5\n", stdout_buf.items);
     try std.testing.expectEqual(@as(usize, 0), stderr_buf.items.len);
 }
@@ -409,6 +413,8 @@ test "http server plugin stream route returns chunked SSE body" {
     try std.testing.expect(std.mem.indexOf(u8, response_buf[0..n], "data: first") != null);
 
     serve_thread.join();
+    try stdout_fw.writer().flush();
+    try stderr_fw.writer().flush();
     try std.testing.expectEqualStrings("route=stream path=/stream\n", stdout_buf.items);
     try std.testing.expectEqual(@as(usize, 0), stderr_buf.items.len);
 }
