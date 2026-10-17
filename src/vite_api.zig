@@ -705,9 +705,22 @@ pub const HttpServer = struct {
     ) !?*HttpRequest {
         const listener = &(self.server orelse return error.NotFound);
         if (require_readable and pollStream(listener.socket.handle, std.posix.POLL.IN, 0, null) != .ok) return null;
-        const accepted = listener.accept(sio.io()) catch |err| {
-            if (err == error.WouldBlock) return null;
-            return err;
+        // NOTE(Zig 0.17): the Threaded backend's netAccept treats EAGAIN on
+        // a non-blocking listener as a programmer bug (errnoBug panic), not
+        // WouldBlock. The listener is deliberately non-blocking here, and a
+        // poll-reported readable listener can still yield an empty accept
+        // queue (TOCTOU), so accept via raw accept4 and map EAGAIN to null.
+        var addr: std.posix.sockaddr = undefined;
+        var addr_len: std.posix.socklen_t = @sizeOf(std.posix.sockaddr);
+        const rc = std.c.accept4(listener.socket.handle, &addr, &addr_len, std.posix.SOCK.CLOEXEC);
+        if (rc < 0) {
+            const e = std.c.errno(rc);
+            if (e == .AGAIN) return null;
+            if (e == .CONNABORTED) return error.ConnectionAborted;
+            return error.ConnectionAborted;
+        }
+        const accepted: std.Io.net.Stream = .{
+            .socket = .{ .handle = @intCast(rc), .address = listener.socket.address },
         };
         // fd ownership transfers into conn below; the block-scoped errdefer
         // only closes if newConn itself fails (double-close would SIGABRT).
