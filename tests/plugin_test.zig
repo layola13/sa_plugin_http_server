@@ -1,6 +1,7 @@
 const std = @import("std");
 const plugin = @import("plugin");
 const plugin_api = @import("plugin_api");
+const sio = @import("sio");
 
 const CaptureStream = struct {
     buffer: *std.array_list.Managed(u8),
@@ -16,6 +17,38 @@ fn captureHostStream(ctx: *CaptureStream) plugin_api.HostStream {
     return .{ .ctx = ctx, .write_all = captureWriteAll };
 }
 
+fn msSleep(ms: i64) void {
+    std.Io.sleep(sio.io(), std.Io.Duration.fromMilliseconds(ms), .awake) catch {};
+}
+
+const TestStream = std.Io.net.Stream;
+
+fn tcpConnect(port: u16) !TestStream {
+    var addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", port);
+    return try std.Io.net.IpAddress.connect(&addr, sio.io(), .{ .mode = .stream });
+}
+
+fn streamWriteAll(s: TestStream, bytes: []const u8) !void {
+    var off: usize = 0;
+    while (off < bytes.len) {
+        const rc = std.c.write(s.socket.handle, bytes.ptr + off, bytes.len - off);
+        if (rc == 0) return error.BrokenPipe;
+        if (rc < 0) return error.ConnectionResetByPeer;
+        off += @intCast(rc);
+    }
+}
+
+fn streamRead(s: TestStream, buf: []u8) !usize {
+    const rc = std.c.read(s.socket.handle, buf.ptr, buf.len);
+    if (rc == 0) return 0;
+    if (rc < 0) return error.ConnectionResetByPeer;
+    return @intCast(rc);
+}
+
+fn streamClose(s: *const TestStream) void {
+    s.close(sio.io());
+}
+
 fn dupeZArgs(allocator: std.mem.Allocator, argv: []const []const u8) ![][*:0]const u8 {
     var out = try allocator.alloc([*:0]const u8, argv.len);
     errdefer allocator.free(out);
@@ -24,7 +57,7 @@ fn dupeZArgs(allocator: std.mem.Allocator, argv: []const []const u8) ![][*:0]con
         for (out[0..copied]) |arg| allocator.free(std.mem.sliceTo(arg, 0));
     }
     for (argv, 0..) |arg, idx| {
-        out[idx] = try allocator.dupeZ(u8, arg);
+        out[idx] = try allocator.dupeSentinel(u8, arg, 0);
         copied += 1;
     }
     return out;
@@ -41,6 +74,12 @@ test "http server plugin abi maps missing serve port to cli diagnostic" {
     defer stdout_buf.deinit();
     var stderr_buf = std.array_list.Managed(u8).init(std.testing.allocator);
     defer stderr_buf.deinit();
+    const stdout_mw = sio.managedWriter(&stdout_buf);
+    var stdout_fw = sio.ForwardWriter(@TypeOf(stdout_mw)).init(stdout_mw);
+    defer stdout_fw.writer().flush() catch {};
+    const stderr_mw = sio.managedWriter(&stderr_buf);
+    var stderr_fw = sio.ForwardWriter(@TypeOf(stderr_mw)).init(stderr_mw);
+    defer stderr_fw.writer().flush() catch {};
     var stdout_ctx = CaptureStream{ .buffer = &stdout_buf };
     var stderr_ctx = CaptureStream{ .buffer = &stderr_buf };
 
@@ -74,33 +113,39 @@ test "http server plugin exports runtime descriptor and scaffold entry" {
     try std.testing.expectEqualStrings("http server plugin", exported.skills_ptr[0].name);
     try std.testing.expect(exported.handle_command != null);
 
-    var original_cwd = try std.fs.cwd().openDir(".", .{});
+    var original_cwd = try sio.cwd().openDir(".", .{});
     defer original_cwd.close();
 
     var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
-    try tmp.dir.setAsCwd();
+    try (sio.Dir{ .inner = tmp.dir }).setAsCwd();
     defer original_cwd.setAsCwd() catch {};
 
     var stdout_buf = std.array_list.Managed(u8).init(std.testing.allocator);
     defer stdout_buf.deinit();
     var stderr_buf = std.array_list.Managed(u8).init(std.testing.allocator);
     defer stderr_buf.deinit();
+    const stdout_mw = sio.managedWriter(&stdout_buf);
+    var stdout_fw = sio.ForwardWriter(@TypeOf(stdout_mw)).init(stdout_mw);
+    defer stdout_fw.writer().flush() catch {};
+    const stderr_mw = sio.managedWriter(&stderr_buf);
+    var stderr_fw = sio.ForwardWriter(@TypeOf(stderr_mw)).init(stderr_mw);
+    defer stderr_fw.writer().flush() catch {};
 
     const argv = [_][]const u8{ "sa", "http-server", "scaffold", "scaffold-out" };
     var ctx = plugin_api.Context{ .allocator = std.testing.allocator };
     const code = try plugin.runHttpServerCommand(
         &ctx,
         argv[0..],
-        stdout_buf.writer().any(),
-        stderr_buf.writer().any(),
+        stdout_fw.writer(),
+        stderr_fw.writer(),
     );
 
     try std.testing.expectEqual(@as(?u8, 0), code);
     try std.testing.expectEqualStrings("scaffold-out\n", stdout_buf.items);
     try std.testing.expectEqual(@as(usize, 0), stderr_buf.items.len);
-    const iface = try std.fs.cwd().readFileAlloc(std.testing.allocator, "scaffold-out/sa_http_server.sai", 1024 * 1024);
+    const iface = try sio.cwd().readFileAlloc(std.testing.allocator, "scaffold-out/sa_http_server.sai", 1024 * 1024);
     defer std.testing.allocator.free(iface);
     try std.testing.expectEqualStrings(plugin.interface_source, iface);
 }
@@ -138,9 +183,9 @@ test "http server saasm api exposes request method" {
             var stream = blk: {
                 var attempt: usize = 0;
                 while (attempt < 50) : (attempt += 1) {
-                    const connected = std.net.tcpConnectToHost(std.testing.allocator, "127.0.0.1", 18082) catch |err| switch (err) {
+                    const connected = tcpConnect(18082) catch |err| switch (err) {
                         error.ConnectionRefused => {
-                            std.time.sleep(20 * std.time.ns_per_ms);
+                            msSleep(20);
                             continue;
                         },
                         else => return err,
@@ -149,10 +194,10 @@ test "http server saasm api exposes request method" {
                 }
                 return error.ConnectionRefused;
             };
-            defer stream.close();
-            try stream.writeAll("POST /method HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+            defer streamClose(&stream);
+            try streamWriteAll(stream, "POST /method HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
             var response_buf: [128]u8 = undefined;
-            _ = try stream.read(&response_buf);
+            _ = try streamRead(stream, &response_buf);
         }
     }.run, .{});
 
@@ -188,9 +233,9 @@ test "http server saasm api can send typed plain response" {
             var stream = blk: {
                 var attempt: usize = 0;
                 while (attempt < 50) : (attempt += 1) {
-                    const connected = std.net.tcpConnectToHost(std.testing.allocator, "127.0.0.1", 18083) catch |err| switch (err) {
+                    const connected = tcpConnect(18083) catch |err| switch (err) {
                         error.ConnectionRefused => {
-                            std.time.sleep(20 * std.time.ns_per_ms);
+                            msSleep(20);
                             continue;
                         },
                         else => return err,
@@ -199,10 +244,10 @@ test "http server saasm api can send typed plain response" {
                 }
                 return error.ConnectionRefused;
             };
-            defer stream.close();
-            try stream.writeAll("GET /typed HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n");
+            defer streamClose(&stream);
+            try streamWriteAll(stream, "GET /typed HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n");
             var response_buf: [512]u8 = undefined;
-            const n = try stream.read(&response_buf);
+            const n = try streamRead(stream, &response_buf);
             const response = response_buf[0..n];
             try std.testing.expect(std.mem.indexOf(u8, response, "HTTP/1.1 418") != null);
             try std.testing.expect(std.mem.indexOf(u8, response, "content-type: application/json") != null);
@@ -239,9 +284,9 @@ test "http server saasm api accepts null pointer for zero-length body" {
             var stream = blk: {
                 var attempt: usize = 0;
                 while (attempt < 50) : (attempt += 1) {
-                    const connected = std.net.tcpConnectToHost(std.testing.allocator, "127.0.0.1", 18084) catch |err| switch (err) {
+                    const connected = tcpConnect(18084) catch |err| switch (err) {
                         error.ConnectionRefused => {
-                            std.time.sleep(20 * std.time.ns_per_ms);
+                            msSleep(20);
                             continue;
                         },
                         else => return err,
@@ -250,10 +295,10 @@ test "http server saasm api accepts null pointer for zero-length body" {
                 }
                 return error.ConnectionRefused;
             };
-            defer stream.close();
-            try stream.writeAll("GET /empty HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n");
+            defer streamClose(&stream);
+            try streamWriteAll(stream, "GET /empty HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n");
             var response_buf: [512]u8 = undefined;
-            const n = try stream.read(&response_buf);
+            const n = try streamRead(stream, &response_buf);
             const response = response_buf[0..n];
             try std.testing.expect(std.mem.indexOf(u8, response, "HTTP/1.1 204") != null);
             try std.testing.expect(std.mem.indexOf(u8, response, "content-length: 0") != null);
@@ -277,22 +322,28 @@ test "http server plugin serve responds on a local loopback socket" {
     defer stdout_buf.deinit();
     var stderr_buf = std.array_list.Managed(u8).init(std.testing.allocator);
     defer stderr_buf.deinit();
+    const stdout_mw = sio.managedWriter(&stdout_buf);
+    var stdout_fw = sio.ForwardWriter(@TypeOf(stdout_mw)).init(stdout_mw);
+    defer stdout_fw.writer().flush() catch {};
+    const stderr_mw = sio.managedWriter(&stderr_buf);
+    var stderr_fw = sio.ForwardWriter(@TypeOf(stderr_mw)).init(stderr_mw);
+    defer stderr_fw.writer().flush() catch {};
 
     const port: u16 = 18080;
     const argv = [_][]const u8{ "sa", "http-server", "serve", "127.0.0.1", "18080", "1" };
     var ctx = plugin_api.Context{ .allocator = std.testing.allocator };
     const serve_thread = try std.Thread.spawn(.{}, struct {
-        fn run(context: *plugin_api.Context, args: []const []const u8, stdout: std.io.AnyWriter, stderr: std.io.AnyWriter) void {
+        fn run(context: *plugin_api.Context, args: []const []const u8, stdout: *std.Io.Writer, stderr: *std.Io.Writer) void {
             _ = plugin.runHttpServerCommand(context, args, stdout, stderr) catch {};
         }
-    }.run, .{ &ctx, argv[0..], stdout_buf.writer().any(), stderr_buf.writer().any() });
+    }.run, .{ &ctx, argv[0..], stdout_fw.writer(), stderr_fw.writer() });
 
     var client = blk: {
         var attempt: usize = 0;
         while (attempt < 50) : (attempt += 1) {
-            const stream = std.net.tcpConnectToHost(std.testing.allocator, "127.0.0.1", port) catch |err| switch (err) {
+            const stream = tcpConnect(port) catch |err| switch (err) {
                 error.ConnectionRefused => {
-                    std.time.sleep(20 * std.time.ns_per_ms);
+                    msSleep(20);
                     continue;
                 },
                 else => return err,
@@ -301,11 +352,11 @@ test "http server plugin serve responds on a local loopback socket" {
         }
         return error.ConnectionRefused;
     };
-    defer client.close();
-    try client.writeAll("GET /echo HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: text/plain\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello");
+    defer streamClose(&client);
+    try streamWriteAll(client, "GET /echo HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: text/plain\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello");
 
     var response_buf: [256]u8 = undefined;
-    const n = try client.read(&response_buf);
+    const n = try streamRead(client, &response_buf);
     try std.testing.expect(n > 0);
     try std.testing.expect(std.mem.indexOf(u8, response_buf[0..n], "hello") != null);
 
@@ -319,22 +370,28 @@ test "http server plugin stream route returns chunked SSE body" {
     defer stdout_buf.deinit();
     var stderr_buf = std.array_list.Managed(u8).init(std.testing.allocator);
     defer stderr_buf.deinit();
+    const stdout_mw = sio.managedWriter(&stdout_buf);
+    var stdout_fw = sio.ForwardWriter(@TypeOf(stdout_mw)).init(stdout_mw);
+    defer stdout_fw.writer().flush() catch {};
+    const stderr_mw = sio.managedWriter(&stderr_buf);
+    var stderr_fw = sio.ForwardWriter(@TypeOf(stderr_mw)).init(stderr_mw);
+    defer stderr_fw.writer().flush() catch {};
 
     const port: u16 = 18081;
     const argv = [_][]const u8{ "sa", "http-server", "serve", "127.0.0.1", "18081", "1" };
     var ctx = plugin_api.Context{ .allocator = std.testing.allocator };
     const serve_thread = try std.Thread.spawn(.{}, struct {
-        fn run(context: *plugin_api.Context, args: []const []const u8, stdout: std.io.AnyWriter, stderr: std.io.AnyWriter) void {
+        fn run(context: *plugin_api.Context, args: []const []const u8, stdout: *std.Io.Writer, stderr: *std.Io.Writer) void {
             _ = plugin.runHttpServerCommand(context, args, stdout, stderr) catch {};
         }
-    }.run, .{ &ctx, argv[0..], stdout_buf.writer().any(), stderr_buf.writer().any() });
+    }.run, .{ &ctx, argv[0..], stdout_fw.writer(), stderr_fw.writer() });
 
     var client = blk: {
         var attempt: usize = 0;
         while (attempt < 50) : (attempt += 1) {
-            const stream = std.net.tcpConnectToHost(std.testing.allocator, "127.0.0.1", port) catch |err| switch (err) {
+            const stream = tcpConnect(port) catch |err| switch (err) {
                 error.ConnectionRefused => {
-                    std.time.sleep(20 * std.time.ns_per_ms);
+                    msSleep(20);
                     continue;
                 },
                 else => return err,
@@ -343,11 +400,11 @@ test "http server plugin stream route returns chunked SSE body" {
         }
         return error.ConnectionRefused;
     };
-    defer client.close();
-    try client.writeAll("GET /stream HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n");
+    defer streamClose(&client);
+    try streamWriteAll(client, "GET /stream HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n");
 
     var response_buf: [512]u8 = undefined;
-    const n = try client.read(&response_buf);
+    const n = try streamRead(client, &response_buf);
     try std.testing.expect(n > 0);
     try std.testing.expect(std.mem.indexOf(u8, response_buf[0..n], "data: first") != null);
 
@@ -356,12 +413,12 @@ test "http server plugin stream route returns chunked SSE body" {
     try std.testing.expectEqual(@as(usize, 0), stderr_buf.items.len);
 }
 
-fn connectEventually(port: u16) !std.net.Stream {
+fn connectEventually(port: u16) !TestStream {
     var attempt: usize = 0;
     while (attempt < 50) : (attempt += 1) {
-        return std.net.tcpConnectToHost(std.heap.page_allocator, "127.0.0.1", port) catch |err| switch (err) {
+        return tcpConnect(port) catch |err| switch (err) {
             error.ConnectionRefused => {
-                std.time.sleep(20 * std.time.ns_per_ms);
+                msSleep(20);
                 continue;
             },
             else => return err,
@@ -381,12 +438,12 @@ fn captureHttpResponse(port: u16, request: []const u8, capture: *ClientCapture) 
         capture.failed = true;
         return;
     };
-    defer stream.close();
-    stream.writeAll(request) catch {
+    defer streamClose(&stream);
+    streamWriteAll(stream, request) catch {
         capture.failed = true;
         return;
     };
-    capture.len = stream.read(&capture.bytes) catch {
+    capture.len = streamRead(stream, &capture.bytes) catch {
         capture.failed = true;
         return;
     };
@@ -394,9 +451,9 @@ fn captureHttpResponse(port: u16, request: []const u8, capture: *ClientCapture) 
 
 fn sendPartialHttpRequest(port: u16) void {
     var stream = connectEventually(port) catch return;
-    defer stream.close();
-    stream.writeAll("GET /slow HTTP/1.1\r\n") catch return;
-    std.time.sleep(100 * std.time.ns_per_ms);
+    defer streamClose(&stream);
+    streamWriteAll(stream, "GET /slow HTTP/1.1\r\n") catch return;
+    msSleep(100);
 }
 
 test "http server v2 status codes and pollable accept are stable" {
@@ -511,8 +568,8 @@ fn websocketV2Client(port: u16, state: *WsClientState) void {
         state.failed = true;
         return;
     };
-    defer stream.close();
-    stream.writeAll(
+    defer streamClose(&stream);
+    streamWriteAll(stream, 
         "GET /ws HTTP/1.1\r\n" ++
             "Host: 127.0.0.1\r\n" ++
             "Upgrade: websocket\r\n" ++
@@ -524,20 +581,20 @@ fn websocketV2Client(port: u16, state: *WsClientState) void {
         return;
     };
     var handshake: [512]u8 = undefined;
-    const handshake_len = stream.read(&handshake) catch {
+    const handshake_len = streamRead(stream, &handshake) catch {
         state.failed = true;
         return;
     };
     state.handshake_ok = std.mem.indexOf(u8, handshake[0..handshake_len], "101 Switching Protocols") != null and
         std.mem.indexOf(u8, handshake[0..handshake_len], "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=") != null;
-    std.time.sleep(50 * std.time.ns_per_ms);
+    msSleep(50);
 
     const frames = [_]u8{
         0x01, 0x82, 1, 2, 3, 4,       'h' ^ 1, 'e' ^ 2,
         0x89, 0x81, 9, 8, 7, 6,       '!' ^ 9, 0x80,
         0x83, 5,    6, 7, 8, 'l' ^ 5, 'l' ^ 6, 'o' ^ 7,
     };
-    stream.writeAll(&frames) catch {
+    streamWriteAll(stream, &frames) catch {
         state.failed = true;
         return;
     };
@@ -545,7 +602,7 @@ fn websocketV2Client(port: u16, state: *WsClientState) void {
     var received: [1024]u8 = undefined;
     var used: usize = 0;
     while (used < received.len) {
-        const count = stream.read(received[used..]) catch {
+        const count = streamRead(stream, received[used..]) catch {
             state.failed = true;
             return;
         };
@@ -620,8 +677,8 @@ fn websocketBackpressureClient(port: u16, state: *BackpressureClientState) void 
         state.failed = true;
         return;
     };
-    defer stream.close();
-    stream.writeAll(
+    defer streamClose(&stream);
+    streamWriteAll(stream, 
         "GET /backpressure HTTP/1.1\r\n" ++
             "Host: 127.0.0.1\r\n" ++
             "Upgrade: websocket\r\n" ++
@@ -633,22 +690,16 @@ fn websocketBackpressureClient(port: u16, state: *BackpressureClientState) void 
         return;
     };
     var handshake: [512]u8 = undefined;
-    const handshake_len = stream.read(&handshake) catch {
+    const handshake_len = streamRead(stream, &handshake) catch {
         state.failed = true;
         return;
     };
     state.handshake_ok = std.mem.indexOf(u8, handshake[0..handshake_len], "101 Switching Protocols") != null;
 
-    std.time.sleep(200 * std.time.ns_per_ms);
+    msSleep(200);
     var buffer: [8192]u8 = undefined;
     while (true) {
-        const count = stream.read(&buffer) catch |err| switch (err) {
-            error.ConnectionResetByPeer => return,
-            else => {
-                state.failed = true;
-                return;
-            },
-        };
+        const count = streamRead(stream, &buffer) catch return;
         if (count == 0) return;
         state.bytes_read += count;
     }
@@ -677,7 +728,7 @@ test "http server v2 websocket reports and recovers from bounded backpressure" {
 
     const handle = @as(*plugin.WebSocketHandle, @ptrCast(@alignCast(ws orelse return error.NullWebSocket)));
     const send_buffer_size: c_int = 4096;
-    try std.posix.setsockopt(handle.stream.handle, std.posix.SOL.SOCKET, std.posix.SO.SNDBUF, std.mem.asBytes(&send_buffer_size));
+    try std.posix.setsockopt(handle.stream.socket.handle, std.posix.SOL.SOCKET, std.posix.SO.SNDBUF, std.mem.asBytes(&send_buffer_size));
 
     const backpressure_payload_bytes = 64 * 1024;
     const payload = try std.testing.allocator.alloc(u8, backpressure_payload_bytes);
@@ -727,13 +778,13 @@ test "http server v2 websocket reports and recovers from bounded backpressure" {
 
 // ---- keep-alive / flush / thread-pool / body-limit tests (P0+P1) ----
 
-fn readFullResponse(stream: std.net.Stream, buf: []u8) !usize {
+fn readFullResponse(stream: TestStream, buf: []u8) !usize {
     var total: usize = 0;
     var header_end: ?usize = null;
     var content_len: usize = 0;
     while (true) {
         if (total >= buf.len) return error.BufferTooSmall;
-        const n = try stream.read(buf[total..]);
+        const n = try streamRead(stream, buf[total..]);
         if (n == 0) return error.Closed;
         total += n;
         if (header_end == null) {
@@ -753,22 +804,22 @@ fn readFullResponse(stream: std.net.Stream, buf: []u8) !usize {
     }
 }
 
-fn readUntilEof(stream: std.net.Stream, buf: []u8) !usize {
+fn readUntilEof(stream: TestStream, buf: []u8) !usize {
     var total: usize = 0;
     while (total < buf.len) {
-        const n = try stream.read(buf[total..]);
+        const n = try streamRead(stream, buf[total..]);
         if (n == 0) break;
         total += n;
     }
     return total;
 }
 
-fn setRecvTimeoutMs(stream: std.net.Stream, ms: u32) void {
+fn setRecvTimeoutMs(stream: TestStream, ms: u32) void {
     const tv = std.posix.timeval{
         .sec = @intCast(ms / 1000),
         .usec = @intCast((ms % 1000) * 1000),
     };
-    std.posix.setsockopt(stream.handle, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, std.mem.asBytes(&tv)) catch {};
+    std.posix.setsockopt(stream.socket.handle, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, std.mem.asBytes(&tv)) catch {};
 }
 
 /// Accept one request and respond "path=<path> bodylen=<n>". Returns false
@@ -820,16 +871,16 @@ test "http server keep-alive serves sequential requests on one connection" {
     defer serve_thread.join();
 
     var client = try connectEventually(port);
-    defer client.close();
+    defer streamClose(&client);
 
     var buf: [1024]u8 = undefined;
-    try client.writeAll("GET /one HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n");
+    try streamWriteAll(client, "GET /one HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n");
     const n1 = try readFullResponse(client, &buf);
     try std.testing.expect(std.mem.indexOf(u8, buf[0..n1], "connection: keep-alive") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf[0..n1], "path=/one bodylen=0") != null);
 
     // Second request reuses the same TCP connection.
-    try client.writeAll("GET /two HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n");
+    try streamWriteAll(client, "GET /two HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n");
     const n2 = try readFullResponse(client, &buf);
     try std.testing.expect(std.mem.indexOf(u8, buf[0..n2], "connection: keep-alive") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf[0..n2], "path=/two bodylen=0") != null);
@@ -843,14 +894,14 @@ test "http server keep-alive carries POST bodies across requests" {
     defer serve_thread.join();
 
     var client = try connectEventually(port);
-    defer client.close();
+    defer streamClose(&client);
 
     var buf: [1024]u8 = undefined;
-    try client.writeAll("POST /echo HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 5\r\n\r\nhello");
+    try streamWriteAll(client, "POST /echo HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 5\r\n\r\nhello");
     const n1 = try readFullResponse(client, &buf);
     try std.testing.expect(std.mem.indexOf(u8, buf[0..n1], "path=/echo bodylen=5") != null);
 
-    try client.writeAll("GET /after HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n");
+    try streamWriteAll(client, "GET /after HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n");
     const n2 = try readFullResponse(client, &buf);
     try std.testing.expect(std.mem.indexOf(u8, buf[0..n2], "path=/after bodylen=0") != null);
 }
@@ -865,16 +916,16 @@ test "http server http10 defaults to close and http11 close header closes" {
     var buf: [1024]u8 = undefined;
 
     var c10 = try connectEventually(port);
-    try c10.writeAll("GET /ten HTTP/1.0\r\n\r\n");
+    try streamWriteAll(c10, "GET /ten HTTP/1.0\r\n\r\n");
     const n10 = try readUntilEof(c10, &buf);
-    c10.close();
+    streamClose(&c10);
     try std.testing.expect(std.mem.indexOf(u8, buf[0..n10], "connection: close") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf[0..n10], "path=/ten") != null);
 
     var c11 = try connectEventually(port);
-    try c11.writeAll("GET /eleven HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n");
+    try streamWriteAll(c11, "GET /eleven HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n");
     const n11 = try readUntilEof(c11, &buf);
-    c11.close();
+    streamClose(&c11);
     try std.testing.expect(std.mem.indexOf(u8, buf[0..n11], "connection: close") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf[0..n11], "path=/eleven") != null);
 }
@@ -898,9 +949,9 @@ fn flushServerFn(state: *FlushState) void {
     const chunk = "data: one\n\n";
     _ = plugin.sa_http_server_resp_stream_write(sresp, chunk.ptr, chunk.len);
     state.chunk_written.store(true, .release);
-    while (!state.do_flush.load(.acquire)) std.time.sleep(1 * std.time.ns_per_ms);
+    while (!state.do_flush.load(.acquire)) msSleep(1);
     _ = plugin.sa_http_server_resp_stream_flush(sresp);
-    while (!state.do_end.load(.acquire)) std.time.sleep(1 * std.time.ns_per_ms);
+    while (!state.do_end.load(.acquire)) msSleep(1);
     _ = plugin.sa_http_server_resp_stream_end(sresp);
     _ = plugin.sa_http_server_resp_stream_free(sresp);
     _ = plugin.sa_http_server_req_free(req);
@@ -918,14 +969,14 @@ test "http server stream flush is real and chunked connections are reusable" {
     defer serve_thread.join();
 
     var client = try connectEventually(port);
-    defer client.close();
-    try client.writeAll("GET /sse HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n");
+    defer streamClose(&client);
+    try streamWriteAll(client, "GET /sse HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n");
 
     // Read the response head (sent eagerly by stream_new).
     var head_buf: [1024]u8 = undefined;
     var head_total: usize = 0;
     while (std.mem.indexOf(u8, head_buf[0..head_total], "\r\n\r\n") == null) {
-        const n = try client.read(head_buf[head_total..]);
+        const n = try streamRead(client, head_buf[head_total..]);
         try std.testing.expect(n > 0);
         head_total += n;
     }
@@ -933,17 +984,17 @@ test "http server stream flush is real and chunked connections are reusable" {
     try std.testing.expect(std.mem.indexOf(u8, head_buf[0..head_total], "connection: keep-alive") != null);
 
     // The server wrote a chunk but has not flushed: nothing may be on the wire.
-    while (!state.chunk_written.load(.acquire)) std.time.sleep(1 * std.time.ns_per_ms);
+    while (!state.chunk_written.load(.acquire)) msSleep(1);
     setRecvTimeoutMs(client, 300);
     var probe: [64]u8 = undefined;
-    try std.testing.expectError(error.WouldBlock, client.read(&probe));
+    try std.testing.expectError(error.WouldBlock, streamRead(client, &probe));
 
     // After flush the chunk must arrive.
     state.do_flush.store(true, .release);
     var cbuf: [512]u8 = undefined;
     var ctotal: usize = 0;
     while (std.mem.indexOf(u8, cbuf[0..ctotal], "data: one") == null) {
-        const n = try client.read(cbuf[ctotal..]);
+        const n = try streamRead(client, cbuf[ctotal..]);
         try std.testing.expect(n > 0);
         ctotal += n;
     }
@@ -951,17 +1002,17 @@ test "http server stream flush is real and chunked connections are reusable" {
     // End the stream; the terminal chunk arrives but the connection stays open.
     state.do_end.store(true, .release);
     while (std.mem.indexOf(u8, cbuf[0..ctotal], "0\r\n\r\n") == null) {
-        const n = try client.read(cbuf[ctotal..]);
+        const n = try streamRead(client, cbuf[ctotal..]);
         try std.testing.expect(n > 0);
         ctotal += n;
     }
 
     setRecvTimeoutMs(client, 5000);
-    try client.writeAll("GET /after-stream HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n");
+    try streamWriteAll(client, "GET /after-stream HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n");
     var rbuf: [1024]u8 = undefined;
     const rn = try readFullResponse(client, &rbuf);
     try std.testing.expect(std.mem.indexOf(u8, rbuf[0..rn], "path=/after-stream") != null);
-    while (!state.finished.load(.acquire)) std.time.sleep(1 * std.time.ns_per_ms);
+    while (!state.finished.load(.acquire)) msSleep(1);
 }
 
 const ThreadedState = struct {
@@ -995,16 +1046,16 @@ fn threadedClientFn(args: ThreadedClientArgs) void {
     var i: usize = 0;
     while (i < args.n) : (i += 1) {
         var stream = connectEventually(args.port) catch return;
-        stream.writeAll("GET /t HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n") catch {
-            stream.close();
+        streamWriteAll(stream, "GET /t HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n") catch {
+            streamClose(&stream);
             return;
         };
         var buf: [512]u8 = undefined;
         const n = readUntilEof(stream, &buf) catch {
-            stream.close();
+            streamClose(&stream);
             return;
         };
-        stream.close();
+        streamClose(&stream);
         if (std.mem.indexOf(u8, buf[0..n], "threaded-ok") != null) _ = args.ok.fetchAdd(1, .acq_rel);
     }
 }
@@ -1015,7 +1066,7 @@ test "http server serve_threaded runs a fixed worker pool for concurrent clients
     // stop_serving shuts the listener down, so no defer-free before join.
     var state = ThreadedState{};
     const serve_thread = try std.Thread.spawn(.{}, threadedServeFn, .{ThreadedServeArgs{ .server = server, .state = &state }});
-    std.time.sleep(100 * std.time.ns_per_ms); // let the pool start accepting
+    msSleep(100); // let the pool start accepting
 
     var ok = std.atomic.Value(u64).init(0);
     const nclients = 8;
@@ -1046,14 +1097,17 @@ test "http server set_max_body_bytes enforces the v1 limit" {
     defer serve_thread.join();
 
     var big = try connectEventually(port);
-    try big.writeAll("POST /big HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 100\r\nConnection: close\r\n\r\n" ++ ("x"**100));
+    try streamWriteAll(big, "POST /big HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 100\r\nConnection: close\r\n\r\n");
+    var big_pad: [100]u8 = undefined;
+    @memset(&big_pad, 'x');
+    try streamWriteAll(big, &big_pad);
     var bbuf: [64]u8 = undefined;
-    try std.testing.expectEqual(@as(usize, 0), try big.read(&bbuf)); // closed, no response
-    big.close();
+    try std.testing.expectEqual(@as(usize, 0), try streamRead(big, &bbuf)); // closed, no response
+    streamClose(&big);
 
     var small = try connectEventually(port);
-    defer small.close();
-    try small.writeAll("POST /small HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello");
+    defer streamClose(&small);
+    try streamWriteAll(small, "POST /small HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello");
     var sbuf: [512]u8 = undefined;
     const sn = try readFullResponse(small, &sbuf);
     try std.testing.expect(std.mem.indexOf(u8, sbuf[0..sn], "bodylen=5") != null);

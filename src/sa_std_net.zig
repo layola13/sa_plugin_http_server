@@ -29,7 +29,7 @@ pub fn buildWebSocketFrame(out: []u8, opcode: u8, payload: []const u8, mask: ?*c
     };
 }
 
-pub fn readWebSocketFrameAlloc(allocator: std.mem.Allocator, stream: std.net.Stream, max_len: u64, expect_masked: bool) !WebSocketFrame {
+pub fn readWebSocketFrameAlloc(allocator: std.mem.Allocator, stream: std.Io.net.Stream, max_len: u64, expect_masked: bool) !WebSocketFrame {
     var header: [14]u8 = undefined;
     try readExact(stream, header[0..2]);
 
@@ -97,11 +97,16 @@ fn unmaskWebSocketPayload(payload: []u8, mask: [4]u8) !void {
     sa_net.unmaskFrame(payload, mask);
 }
 
-fn readExact(stream: std.net.Stream, buffer: []u8) !void {
+fn readExact(stream: std.Io.net.Stream, buffer: []u8) !void {
     var offset: usize = 0;
     while (offset < buffer.len) {
-        const read_n = stream.read(buffer[offset..]) catch return error.EndOfStream;
-        if (read_n == 0) return error.EndOfStream;
-        offset += read_n;
+        const rc = std.c.read(stream.socket.handle, buffer.ptr + offset, buffer.len - offset);
+        if (rc == 0) return error.EndOfStream;
+        if (rc < 0) {
+            const e = std.c.errno(rc);
+            if (e == .AGAIN) return error.WouldBlock;
+            return error.EndOfStream;
+        }
+        offset += @intCast(rc);
     }
 }
