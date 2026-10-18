@@ -21,12 +21,12 @@ pub fn build(b: *std.Build) void {
     const interface_options = b.addOptions();
     interface_options.addOption([]const u8, "source", interface_source);
     const sa_net_primitives = b.createModule(.{
-        .root_source_file = b.path(b.pathJoin(&.{ sci_root, "src", "runtime", "sa_net_primitives.zig" })),
+        .root_source_file = .{ .cwd_relative = b.pathJoin(&.{ sci_root, "src", "runtime", "sa_net_primitives.zig" }) },
         .target = target,
         .optimize = optimize,
     });
     const sio_module = b.createModule(.{
-        .root_source_file = b.path(b.pathJoin(&.{ sci_root, "src", "sa_io.zig" })),
+        .root_source_file = .{ .cwd_relative = b.pathJoin(&.{ sci_root, "src", "sa_io.zig" }) },
         .target = target,
         .optimize = optimize,
     });
