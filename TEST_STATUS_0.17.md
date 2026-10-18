@@ -1,6 +1,6 @@
 # sa_plugin_http_server 0.17 测试状态
 
-验证时间: 2026-10-17, zig 0.17.0, sci main, LLVM-20
+验证时间: 2026-10-18 (clean rebuild), zig 0.17.0, sci main, LLVM-20
 命令: `zig build test --summary all --test-timeout 60s`
 
 ## 结果: 17 通过 / 1 跳过 (共18) — 全绿
@@ -19,3 +19,7 @@
 - vite_api acceptFresh: raw accept4 替代 std accept
   (0.17 Threaded 后端把非阻塞 listener 上的 EAGAIN 当 errnoBug panic;
   poll→accept TOCTOU 触发 serve_threaded 崩溃)
+
+## 2026-10-18 复验 (S2)
+- 干净复测 (.zig-cache 清理后): 17 通过 / 1 跳过 (共18) — 全绿
+- vite_api.zig 0.17 重写已完成，无残留编译错误
