@@ -117,7 +117,7 @@ fn recycleOrCloseRequest(request: *HttpRequest) void {
         // The client usually closes a connection-per-request socket right
         // after reading the response; recycling it would only fill the idle
         // pool with dead connections and slow every later accept to O(pool).
-        if (HttpServer.isPeerClosed(conn.http.connection.stream)) {
+        if (HttpServer.isPeerClosed(conn.stream)) {
             request.deinit();
         } else {
             request.freeResources();
@@ -282,7 +282,7 @@ pub export fn sa_http_server_websocket_upgrade(req: ?*anyopaque, out_ws: ?*?*any
         "HTTP/1.1 101 Switching Protocols\r\nupgrade: websocket\r\nconnection: Upgrade\r\nsec-websocket-accept: {s}\r\n\r\n",
         .{accept},
     ) catch return @intFromEnum(plugin_api.AbiStatus.failed);
-    request.stream().writeAll(response) catch return @intFromEnum(plugin_api.AbiStatus.failed);
+    core.streamWriteAll(request.stream(), response) catch return @intFromEnum(plugin_api.AbiStatus.failed);
 
     const handle = WebSocketHandle.initFromRequest(request) catch return @intFromEnum(plugin_api.AbiStatus.failed);
     slot.* = @ptrCast(handle);
@@ -348,11 +348,11 @@ pub export fn sa_http_server_accept_v2(server: ?*anyopaque, timeout_ms: u32, out
     slot.* = null;
     const server_ptr = server orelse return networkStatus(.invalid);
     const srv = @as(*HttpServer, @ptrCast(@alignCast(server_ptr)));
-    const started_ms = std.time.milliTimestamp();
+    const started_ms = core.nowMillis();
     const poll_status = srv.pollAccept(timeout_ms);
     if (poll_status != .ok) return networkStatus(poll_status);
     const receive_timeout_ms: u32 = if (timeout_ms == 0) 0 else blk: {
-        const elapsed_signed = std.time.milliTimestamp() - started_ms;
+        const elapsed_signed = core.nowMillis() - started_ms;
         const elapsed_ms: u64 = if (elapsed_signed <= 0) 0 else @intCast(elapsed_signed);
         if (elapsed_ms >= timeout_ms) return networkStatus(.timeout);
         break :blk @intCast(@as(u64, timeout_ms) - elapsed_ms);
@@ -404,7 +404,7 @@ pub export fn sa_http_server_resp_send_v2(resp: ?*anyopaque, body_ptr: ?[*]const
         break :blk "";
     };
     const response = @as(*HttpResponse, @ptrCast(@alignCast(resp_ptr)));
-    const poll_status = core.pollStream(response.request.stream(), std.posix.POLL.OUT, timeout_ms, null);
+    const poll_status = core.pollStream(response.request.stream().socket.handle, std.posix.POLL.OUT, timeout_ms, null);
     if (poll_status != .ok) return networkStatus(poll_status);
     response.send(body) catch |err| return networkStatus(core.statusFromError(err));
     return networkStatus(.ok);
@@ -450,7 +450,7 @@ pub export fn sa_http_server_resp_stream_write_v2(resp: ?*anyopaque, body_ptr: ?
     };
     const response = @as(*HttpStreamResponse, @ptrCast(@alignCast(resp_ptr)));
     if (response.ended) return networkStatus(.closed);
-    const poll_status = core.pollStream(response.request.stream(), std.posix.POLL.OUT, timeout_ms, null);
+    const poll_status = core.pollStream(response.request.stream().socket.handle, std.posix.POLL.OUT, timeout_ms, null);
     if (poll_status != .ok) return networkStatus(poll_status);
     response.writeChunk(body) catch |err| return networkStatus(core.statusFromError(err));
     return networkStatus(.ok);
@@ -468,7 +468,7 @@ pub export fn sa_http_server_resp_stream_end_v2(resp: ?*anyopaque, timeout_ms: u
     const resp_ptr = resp orelse return networkStatus(.invalid);
     const response = @as(*HttpStreamResponse, @ptrCast(@alignCast(resp_ptr)));
     if (response.ended) return networkStatus(.closed);
-    const poll_status = core.pollStream(response.request.stream(), std.posix.POLL.OUT, timeout_ms, null);
+    const poll_status = core.pollStream(response.request.stream().socket.handle, std.posix.POLL.OUT, timeout_ms, null);
     if (poll_status != .ok) return networkStatus(poll_status);
     response.endChunked() catch |err| return networkStatus(core.statusFromError(err));
     return networkStatus(.ok);

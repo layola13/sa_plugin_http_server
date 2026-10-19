@@ -1,7 +1,10 @@
 const std = @import("std");
 const sa_std_net = @import("sa_std_net.zig");
 
-var sigpipe_once = std.once(installSigpipeHandler);
+const sio = @import("sio");
+
+var sigpipe_installed = false;
+var sigpipe_mu: std.atomic.Mutex = .unlocked;
 
 fn noopSigpipe(_: i32) callconv(.c) void {}
 
@@ -9,15 +12,19 @@ fn installSigpipeHandler() void {
     if (comptime @hasDecl(std.posix.SIG, "PIPE")) {
         const act: std.posix.Sigaction = .{
             .handler = .{ .handler = noopSigpipe },
-            .mask = std.posix.empty_sigset,
+            .mask = std.posix.sigemptyset(),
             .flags = 0,
         };
         std.posix.sigaction(std.posix.SIG.PIPE, &act, null);
-    }
-}
+    }}
 
 pub fn ensureProcessSignalSafety() void {
-    sigpipe_once.call();
+    while (!sigpipe_mu.tryLock()) std.Thread.yield() catch {};
+    defer sigpipe_mu.unlock();
+    if (!sigpipe_installed) {
+        installSigpipeHandler();
+        sigpipe_installed = true;
+    }
 }
 
 pub const Header = struct {
@@ -71,10 +78,13 @@ pub fn statusFromError(err: anyerror) NetworkStatus {
     };
 }
 
-pub fn pollStream(stream: std.net.Stream, events: i16, timeout_ms: u32, out_events: ?*u32) NetworkStatus {
-    if (out_events) |slot| slot.* = 0;
+pub fn nowMillis() i64 {
+    return std.Io.Timestamp.now(sio.io(), .awake).toMilliseconds();
+}
+
+pub fn pollStream(fd: std.posix.fd_t, events: i16, timeout_ms: u32, out_events: ?*u32) NetworkStatus {
     var poll_fds = [1]std.posix.pollfd{.{
-        .fd = stream.handle,
+        .fd = fd,
         .events = events,
         .revents = 0,
     }};
@@ -94,28 +104,45 @@ pub fn pollStream(stream: std.net.Stream, events: i16, timeout_ms: u32, out_even
     return .would_block;
 }
 
-fn setNonBlocking(stream: std.net.Stream) !void {
-    const flags = try std.posix.fcntl(stream.handle, std.posix.F.GETFL, 0);
-    const nonblocking = flags | (@as(usize, 1) << @bitOffsetOf(std.posix.O, "NONBLOCK"));
-    _ = try std.posix.fcntl(stream.handle, std.posix.F.SETFL, nonblocking);
+fn setNonBlocking(stream: std.Io.net.Stream) !void {
+    const fd = stream.socket.handle;
+    const rc_get = std.c.fcntl(fd, std.os.linux.F.GETFL, @as(c_int, 0));
+    if (rc_get < 0) return error.Unexpected;
+    const flags: c_int = @intCast(rc_get);
+    const nb_bit: c_int = @as(c_int, 1) << @intCast(@bitOffsetOf(std.posix.O, "NONBLOCK"));
+    const rc_set = std.c.fcntl(fd, std.os.linux.F.SETFL, flags | nb_bit);
+    if (rc_set < 0) return error.Unexpected;
 }
 
 /// Restore fully blocking I/O and clear any receive timeout.
-fn setBlocking(stream: std.net.Stream) !void {
-    const flags = try std.posix.fcntl(stream.handle, std.posix.F.GETFL, 0);
-    const blocking = flags & ~(@as(usize, 1) << @bitOffsetOf(std.posix.O, "NONBLOCK"));
-    _ = try std.posix.fcntl(stream.handle, std.posix.F.SETFL, blocking);
+fn setBlocking(stream: std.Io.net.Stream) !void {
+    const fd = stream.socket.handle;
+    const rc_get = std.c.fcntl(fd, std.os.linux.F.GETFL, @as(c_int, 0));
+    if (rc_get < 0) return error.Unexpected;
+    const flags: c_int = @intCast(rc_get);
+    const nb_bit: c_int = @as(c_int, 1) << @intCast(@bitOffsetOf(std.posix.O, "NONBLOCK"));
+    const rc_set = std.c.fcntl(fd, std.os.linux.F.SETFL, flags & ~nb_bit);
+    if (rc_set < 0) return error.Unexpected;
     const zero = std.posix.timeval{ .sec = 0, .usec = 0 };
-    std.posix.setsockopt(stream.handle, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, std.mem.asBytes(&zero)) catch {};
+    std.posix.setsockopt(fd, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, std.mem.asBytes(&zero)) catch {};
 }
 
-fn setReceiveTimeout(stream: std.net.Stream, timeout_ms: u32) !void {
+fn setReceiveTimeout(stream: std.Io.net.Stream, timeout_ms: u32) !void {
     if (timeout_ms == 0) return setNonBlocking(stream);
     const timeout = std.posix.timeval{
         .sec = @intCast(timeout_ms / 1000),
         .usec = @intCast((timeout_ms % 1000) * 1000),
     };
-    try std.posix.setsockopt(stream.handle, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, std.mem.asBytes(&timeout));
+    try std.posix.setsockopt(stream.socket.handle, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, std.mem.asBytes(&timeout));
+}
+
+fn setNonBlockingFd(fd: std.posix.fd_t) !void {
+    const rc_get = std.c.fcntl(fd, std.os.linux.F.GETFL, @as(c_int, 0));
+    if (rc_get < 0) return error.Unexpected;
+    const flags: c_int = @intCast(rc_get);
+    const nb_bit: c_int = @as(c_int, 1) << @intCast(@bitOffsetOf(std.posix.O, "NONBLOCK"));
+    const rc_set = std.c.fcntl(fd, std.os.linux.F.SETFL, flags | nb_bit);
+    if (rc_set < 0) return error.Unexpected;
 }
 
 fn validHeaderName(name: []const u8) bool {
@@ -141,14 +168,14 @@ const ResponseHeaderBag = struct {
     allocator: std.mem.Allocator,
     content_type: []const u8,
     owns_content_type: bool = false,
-    extra: std.ArrayList(Header),
+    extra: std.array_list.Managed(Header),
     byte_len: usize = 0,
 
     fn init(allocator: std.mem.Allocator, content_type: []const u8) ResponseHeaderBag {
         return .{
             .allocator = allocator,
             .content_type = content_type,
-            .extra = std.ArrayList(Header).init(allocator),
+            .extra = std.array_list.Managed(Header).init(allocator),
         };
     }
 
@@ -207,12 +234,15 @@ const WebSocketOpcode = enum(u8) {
     pong = 10,
 };
 
-/// Per-connection state for HTTP keep-alive. Owns the std.http.Server parser
-/// (which buffers pipelined bytes across requests) and its heap read buffer.
+/// Per-connection state for HTTP keep-alive. Owns the TCP stream plus any
+/// pipelined bytes already read but not yet consumed.
 /// Always heap-allocated and never moved while pooled.
 const ConnState = struct {
-    http: std.http.Server,
+    stream: std.Io.net.Stream,
     read_buffer: []u8,
+    /// Bytes in read_buffer[request_start..read_len] are buffered pipelined data.
+    read_len: usize = 0,
+    request_start: usize = 0,
 };
 
 /// Cap on idle keep-alive connections held in the pool (each pins an 8KB
@@ -270,13 +300,13 @@ const worker_head_parse_timeout_ms: u32 = 5000;
 
 pub const HttpServer = struct {
     allocator: std.mem.Allocator,
-    server: ?std.net.Server = null,
+    server: ?std.Io.net.Server = null,
     /// v1 request body limit. Default 2MB (historic); configurable via
     /// sa_http_server_set_max_body_bytes. v2 always uses 16MB.
     max_body_len: usize = 2 * 1024 * 1024,
     /// Idle keep-alive connections waiting for their next request.
-    recycled: std.ArrayList(*ConnState),
-    recycled_mutex: std.Thread.Mutex = .{},
+    recycled: std.array_list.Managed(*ConnState),
+    recycled_mutex: std.atomic.Mutex = .unlocked,
     /// Self-pipe: pushRecycled writes a byte so an accept loop blocked in
     /// poll() wakes up immediately. Recycling is asynchronous (handler
     /// threads recycle after the accept loop snapshotted the pool), so
@@ -289,20 +319,23 @@ pub const HttpServer = struct {
     pub fn init(allocator: std.mem.Allocator) !*HttpServer {
         const self = try allocator.create(HttpServer);
         errdefer allocator.destroy(self);
-        const pipe = try std.posix.pipe();
+        var pipe: [2]std.posix.fd_t = undefined;
+        if (std.c.pipe(&pipe) != 0) return error.Unexpected;
         errdefer {
-            std.posix.close(pipe[0]);
-            std.posix.close(pipe[1]);
+            _ = std.c.close(pipe[0]);
+            _ = std.c.close(pipe[1]);
         }
         for (pipe) |fd| {
-            const flags = try std.posix.fcntl(fd, std.posix.F.GETFL, 0);
-            const nonblocking = flags | (@as(usize, 1) << @bitOffsetOf(std.posix.O, "NONBLOCK"));
-            _ = try std.posix.fcntl(fd, std.posix.F.SETFL, nonblocking);
+            const rc_get = std.c.fcntl(fd, std.os.linux.F.GETFL, @as(c_int, 0));
+            if (rc_get < 0) return error.Unexpected;
+            const flags: c_int = @intCast(rc_get);
+            const nb_bit: c_int = @as(c_int, 1) << @intCast(@bitOffsetOf(std.posix.O, "NONBLOCK"));
+            if (std.c.fcntl(fd, std.os.linux.F.SETFL, flags | nb_bit) < 0) return error.Unexpected;
         }
         self.* = .{
             .allocator = allocator,
             .server = null,
-            .recycled = std.ArrayList(*ConnState).init(allocator),
+            .recycled = std.array_list.Managed(*ConnState).init(allocator),
             .wake_pipe = pipe,
         };
         return self;
@@ -312,16 +345,16 @@ pub const HttpServer = struct {
         try self.startWithOptions(host, port, .{ .reuse_address = true });
     }
 
-    pub fn startWithOptions(self: *HttpServer, host: []const u8, port: u16, options: std.net.Address.ListenOptions) !void {
+    pub fn startWithOptions(self: *HttpServer, host: []const u8, port: u16, options: std.Io.net.IpAddress.ListenOptions) !void {
         if (self.server != null) return;
-        const address = try std.net.Address.parseIp(host, port);
-        self.server = try address.listen(options);
+        const address = try std.Io.net.IpAddress.parse(host, port);
+        self.server = try address.listen(sio.io(), options);
         // The accept loop must never block inside accept(): a poll-reported
         // readable listener can still yield an empty accept queue if the
         // pending connection reset between poll and accept. Non-blocking
         // accept returns WouldBlock instead of wedging the whole server.
-        setNonBlocking(self.server.?.stream) catch |err| {
-            self.server.?.deinit();
+        setNonBlockingFd(self.server.?.socket.handle) catch |err| {
+            self.server.?.deinit(sio.io());
             self.server = null;
             return err;
         };
@@ -411,7 +444,7 @@ pub const HttpServer = struct {
     /// sa_http_server_free once the loop has returned.
     pub fn stopServing(self: *HttpServer) void {
         if (self.pool) |pool| pool.stopping.store(true, .release);
-        if (self.server) |*s| std.posix.shutdown(s.stream.handle, .both) catch {};
+        if (self.server) |*s| _ = std.c.shutdown(s.socket.handle, 2);
     }
 
     /// Public pollable status (v2 ABI). See pollAcceptEx for the internals.
@@ -428,15 +461,15 @@ pub const HttpServer = struct {
         var fds: [max_recycled_conns + 2]std.posix.pollfd = undefined;        var nfds: usize = 0;
         var nrec: usize = 0;
         {
-            self.recycled_mutex.lock();
+            while (!self.recycled_mutex.tryLock()) std.Thread.yield() catch {};
             defer self.recycled_mutex.unlock();
             for (self.recycled.items) |conn| {
                 // Pipelined bytes already buffered: no need to poll.
-                if (conn.http.read_buffer_len > conn.http.next_request_start) {
+                if (conn.read_len > conn.request_start) {
                     return .{ .status = .ok, .recycled_ready = true, .listener_ready = false };
                 }
                 fds[nfds] = .{
-                    .fd = conn.http.connection.stream.handle,
+                    .fd = conn.stream.socket.handle,
                     .events = std.posix.POLL.IN,
                     .revents = 0,
                 };
@@ -447,7 +480,7 @@ pub const HttpServer = struct {
             nfds += 1;
             if (self.server) |*s| {
                 fds[nfds] = .{
-                    .fd = s.stream.handle,
+                    .fd = s.socket.handle,
                     .events = std.posix.POLL.IN,
                     .revents = 0,
                 };
@@ -530,10 +563,10 @@ pub const HttpServer = struct {
 
     fn acceptBounded(self: *HttpServer, max_body_len: usize, timeout_ms: u32) !*HttpRequest {
         if (self.server == null) return error.NotFound;
-        const start_ms = std.time.milliTimestamp();
+        const start_ms = nowMillis();
         while (true) {
             const elapsed_ms: u64 = blk: {
-                const e = std.time.milliTimestamp() - start_ms;
+                const e = nowMillis() - start_ms;
                 break :blk if (e <= 0) 0 else @intCast(e);
             };
             if (elapsed_ms >= timeout_ms) return if (timeout_ms == 0) error.WouldBlock else error.HttpHeadersUnreadable;
@@ -562,13 +595,13 @@ pub const HttpServer = struct {
     /// batch, so the cost stays flat no matter how many idle connections sit
     /// in the pool.
     fn drainRecycled(self: *HttpServer, max_body_len: usize, post_parse_timeout: ?u32) ?*HttpRequest {
-        var conns = std.ArrayList(*ConnState).init(self.allocator);
+        var conns = std.array_list.Managed(*ConnState).init(self.allocator);
         {
-            self.recycled_mutex.lock();
+            while (!self.recycled_mutex.tryLock()) std.Thread.yield() catch {};
             defer self.recycled_mutex.unlock();
-            std.mem.swap(std.ArrayList(*ConnState), &self.recycled, &conns);
+            std.mem.swap(std.array_list.Managed(*ConnState), &self.recycled, &conns);
         }
-        var keep = std.ArrayList(*ConnState).init(self.allocator);
+        var keep = std.array_list.Managed(*ConnState).init(self.allocator);
         defer keep.deinit();
         var result: ?*HttpRequest = null;
 
@@ -576,7 +609,7 @@ pub const HttpServer = struct {
         var pfds: [max_recycled_conns]std.posix.pollfd = undefined;
         for (conns.items, 0..) |conn, i| {
             pfds[i] = .{
-                .fd = conn.http.connection.stream.handle,
+                .fd = conn.stream.socket.handle,
                 .events = std.posix.POLL.IN,
                 .revents = 0,
             };
@@ -591,8 +624,8 @@ pub const HttpServer = struct {
                 keep.append(conn) catch self.destroyConn(conn, true);
                 continue;
             }
-            const stream = conn.http.connection.stream;
-            const has_buffered = conn.http.read_buffer_len > conn.http.next_request_start;
+            const stream = conn.stream;
+            const has_buffered = conn.read_len > conn.request_start;
             const rev: i16 = if (npoll > 0) pfds[i].revents else 0;
             const dead = rev & (std.posix.POLL.ERR | std.posix.POLL.NVAL) != 0;
             // HUP without IN (or with nothing readable) also means the peer
@@ -645,7 +678,7 @@ pub const HttpServer = struct {
 
         // Push the survivors back under a single lock hold. No wake-pipe
         // byte: these were already in the pool before this sweep.
-        self.recycled_mutex.lock();
+        while (!self.recycled_mutex.tryLock()) std.Thread.yield() catch {};
         defer self.recycled_mutex.unlock();
         for (keep.items) |conn| {
             if (self.recycled.items.len >= max_recycled_conns) {
@@ -671,19 +704,32 @@ pub const HttpServer = struct {
         require_readable: bool,
     ) !?*HttpRequest {
         const listener = &(self.server orelse return error.NotFound);
-        if (require_readable and pollStream(listener.stream, std.posix.POLL.IN, 0, null) != .ok) return null;
-        const accepted = listener.accept() catch |err| {
-            if (err == error.WouldBlock) return null;
-            return err;
+        if (require_readable and pollStream(listener.socket.handle, std.posix.POLL.IN, 0, null) != .ok) return null;
+        // NOTE(Zig 0.17): the Threaded backend's netAccept treats EAGAIN on
+        // a non-blocking listener as a programmer bug (errnoBug panic), not
+        // WouldBlock. The listener is deliberately non-blocking here, and a
+        // poll-reported readable listener can still yield an empty accept
+        // queue (TOCTOU), so accept via raw accept4 and map EAGAIN to null.
+        var addr: std.posix.sockaddr = undefined;
+        var addr_len: std.posix.socklen_t = @sizeOf(std.posix.sockaddr);
+        const rc = std.c.accept4(listener.socket.handle, &addr, &addr_len, std.posix.SOCK.CLOEXEC);
+        if (rc < 0) {
+            const e = std.c.errno(rc);
+            if (e == .AGAIN) return null;
+            if (e == .CONNABORTED) return error.ConnectionAborted;
+            return error.ConnectionAborted;
+        }
+        const accepted: std.Io.net.Stream = .{
+            .socket = .{ .handle = @intCast(rc), .address = listener.socket.address },
         };
         // fd ownership transfers into conn below; the block-scoped errdefer
         // only closes if newConn itself fails (double-close would SIGABRT).
         const conn: *ConnState = blk: {
-            errdefer accepted.stream.close();
+            errdefer accepted.close(sio.io());
             break :blk try self.newConn(accepted);
         };
         errdefer self.destroyConn(conn, true);
-        const stream = conn.http.connection.stream;
+        const stream = conn.stream;
         // Bound the head parse: v1 (parse_timeout == null) gets a generous
         // 30s rather than blocking forever on a silent client.
         const head_timeout_ms = parse_timeout orelse 30_000;
@@ -698,30 +744,63 @@ pub const HttpServer = struct {
         return req;
     }
 
-    fn parseHead(self: *HttpServer, conn: *ConnState, max_body_len: usize) !*HttpRequest {
-        var std_request = try conn.http.receiveHead();
+    fn connCompact(conn: *ConnState) void {
+        if (conn.request_start == 0) return;
+        if (conn.request_start < conn.read_len) {
+            const remain = conn.read_len - conn.request_start;
+            std.mem.copyForwards(u8, conn.read_buffer[0..remain], conn.read_buffer[conn.request_start..conn.read_len]);
+            conn.read_len = remain;
+        } else {
+            conn.read_len = 0;
+        }
+        conn.request_start = 0;
+    }
 
-        const content_length: usize = blk: {
-            const cl = std_request.head.content_length orelse 0;
-            break :blk @intCast(cl);
-        };
+    fn connFill(conn: *ConnState) !void {
+        connCompact(conn);
+        if (conn.read_len >= conn.read_buffer.len) return error.HttpHeadersOversize;
+        const fd = conn.stream.socket.handle;
+        const rc = std.c.read(fd, conn.read_buffer.ptr + conn.read_len, conn.read_buffer.len - conn.read_len);
+        if (rc == 0) return error.EndOfStream;
+        if (rc < 0) {
+            const e = std.c.errno(rc);
+            if (e == .AGAIN) return error.HttpHeadersUnreadable;
+            return error.ConnectionResetByPeer;
+        }
+        conn.read_len += @intCast(rc);
+    }
+
+    fn parseHead(self: *HttpServer, conn: *ConnState, max_body_len: usize) !*HttpRequest {
+
+        while (true) {
+            const avail = conn.read_buffer[conn.request_start..conn.read_len];
+            if (std.mem.indexOf(u8, avail, "\r\n\r\n")) |_| break;
+            if (avail.len >= 64 * 1024) return error.HttpHeadersOversize;
+            try connFill(conn);
+        }
+        const avail = conn.read_buffer[conn.request_start..conn.read_len];
+        const head_end = std.mem.indexOf(u8, avail, "\r\n\r\n") orelse return error.HttpHeadersUnreadable;
+        const head_bytes = avail[0 .. head_end + 4];
+        const parsed = try std.http.Server.Request.Head.parse(head_bytes);
+        const content_length: usize = @intCast(parsed.content_length orelse 0);
         // We only consume Content-Length bodies. Chunked request bodies are
         // left unread, which forces the connection closed after the response.
-        const supports_reuse = std_request.head.transfer_encoding == .none;
-        const keep_alive = std_request.head.keep_alive and supports_reuse;
+        const supports_reuse = parsed.transfer_encoding == .none;
+        const keep_alive = parsed.keep_alive and supports_reuse;
+        const body_start = conn.request_start + head_end + 4;
 
         const request = try self.allocator.create(HttpRequest);
         errdefer self.allocator.destroy(request);
 
-        const method = try methodStringAlloc(self.allocator, std_request.head.method);
+        const method = try methodStringAlloc(self.allocator, parsed.method);
         errdefer self.allocator.free(method);
 
-        const target = try self.allocator.dupe(u8, std_request.head.target);
+        const target = try self.allocator.dupe(u8, parsed.target);
         errdefer self.allocator.free(target);
 
-        var headers = std.ArrayList(Header).init(self.allocator);
+        var headers = std.array_list.Managed(Header).init(self.allocator);
         errdefer headers.deinit();
-        var it = std_request.iterateHeaders();
+        var it = std.http.HeaderIterator.init(head_bytes);
         while (it.next()) |header| {
             try headers.append(.{
                 .name = try self.allocator.dupe(u8, header.name),
@@ -729,20 +808,60 @@ pub const HttpServer = struct {
             });
         }
 
-        var body = std.ArrayList(u8).init(self.allocator);
+        var body = std.array_list.Managed(u8).init(self.allocator);
         errdefer body.deinit();
         if (content_length > 0) {
             if (content_length > max_body_len) return error.BodyTooLarge;
-            const reader = try std_request.reader();
-            try body.ensureTotalCapacity(content_length);
-            try reader.readNoEof(body.unusedCapacitySlice()[0..content_length]);
-            body.items.len = content_length;
+            const reader_need = body_start + content_length;
+            if (reader_need > conn.read_buffer.len + max_body_len) return error.BodyTooLarge;
+            while (conn.read_len < reader_need) {
+                if (conn.read_len >= conn.read_buffer.len) {
+                    const extra = try self.allocator.alloc(u8, reader_need - conn.read_len);
+                    defer self.allocator.free(extra);
+                    var off: usize = 0;
+                    while (off < extra.len) {
+                        const rc = std.c.read(conn.stream.socket.handle, extra.ptr + off, extra.len - off);
+                        if (rc == 0) return error.EndOfStream;
+                        if (rc < 0) {
+                            const e = std.c.errno(rc);
+                            if (e == .AGAIN) return error.HttpHeadersUnreadable;
+                            return error.ConnectionResetByPeer;
+                        }
+                        off += @intCast(rc);
+                    }
+                    try body.appendSlice(conn.read_buffer[body_start..conn.read_len]);
+                    try body.appendSlice(extra);
+                    conn.read_len = 0;
+                    conn.request_start = 0;
+                    // request struct filled below; skip default tail copy
+                    request.* = .{
+                        .allocator = self.allocator,
+                        .conn = conn,
+                        .server = self,
+                        .keep_alive = keep_alive,
+                        .response_done = false,
+                        .method = method,
+                        .target = target,
+                        .headers = try headers.toOwnedSlice(),
+                        .body = try body.toOwnedSlice(),
+                    };
+                    return request;
+                }
+                const rc = std.c.read(conn.stream.socket.handle, conn.read_buffer.ptr + conn.read_len, @min(conn.read_buffer.len - conn.read_len, reader_need - conn.read_len));
+                if (rc == 0) return error.EndOfStream;
+                if (rc < 0) {
+                    const e = std.c.errno(rc);
+                    if (e == .AGAIN) return error.HttpHeadersUnreadable;
+                    return error.ConnectionResetByPeer;
+                }
+                conn.read_len += @intCast(rc);
+            }
+            try body.appendSlice(conn.read_buffer[body_start..reader_need]);
+            conn.request_start = reader_need;
         } else if (supports_reuse) {
-            // No body: drive the parser back to .ready so the connection can
-            // serve the next request. (remaining==0 completes immediately.)
-            var reader = try std_request.reader();
-            var tmp: [1]u8 = undefined;
-            _ = try reader.read(&tmp);
+            // No body: advance past the parsed head so the next accept on
+            // this recycled connection parses the NEXT request, not this one.
+            conn.request_start = body_start;
         }
 
         request.* = .{
@@ -759,26 +878,28 @@ pub const HttpServer = struct {
         return request;
     }
 
-    fn newConn(self: *HttpServer, accepted: std.net.Server.Connection) !*ConnState {
+    fn newConn(self: *HttpServer, accepted: std.Io.net.Stream) !*ConnState {
         const read_buffer = try self.allocator.alloc(u8, conn_read_buffer_len);
         errdefer self.allocator.free(read_buffer);
         const conn = try self.allocator.create(ConnState);
         errdefer self.allocator.destroy(conn);
         conn.* = .{
-            .http = std.http.Server.init(accepted, read_buffer),
+            .stream = accepted,
             .read_buffer = read_buffer,
+            .read_len = 0,
+            .request_start = 0,
         };
         return conn;
     }
 
     fn destroyConn(self: *HttpServer, conn: *ConnState, close_stream: bool) void {
-        if (close_stream) conn.http.connection.stream.close();
+        if (close_stream) conn.stream.close(sio.io());
         self.allocator.free(conn.read_buffer);
         self.allocator.destroy(conn);
     }
 
     fn popRecycled(self: *HttpServer) ?*ConnState {
-        self.recycled_mutex.lock();
+        while (!self.recycled_mutex.tryLock()) std.Thread.yield() catch {};
         defer self.recycled_mutex.unlock();
         if (self.recycled.items.len == 0) return null;
         return self.recycled.pop();
@@ -789,9 +910,9 @@ pub const HttpServer = struct {
     /// a pool slot, a wake-pipe byte, and a future O(pool) sweep. A readable
     /// socket is peeked: real bytes (pipelined next request) mean "keep",
     /// EOF means "drop".
-    pub fn isPeerClosed(stream: std.net.Stream) bool {
+    pub fn isPeerClosed(stream: std.Io.net.Stream) bool {
         var pfd = [1]std.posix.pollfd{.{
-            .fd = stream.handle,
+            .fd = stream.socket.handle,
             .events = std.posix.POLL.IN,
             .revents = 0,
         }};
@@ -801,7 +922,9 @@ pub const HttpServer = struct {
         if (rev & (std.posix.POLL.ERR | std.posix.POLL.NVAL | std.posix.POLL.HUP) != 0) return true;
         if (rev & std.posix.POLL.IN == 0) return false;
         var b: [1]u8 = undefined;
-        const n = std.posix.recv(stream.handle, &b, std.os.linux.MSG.PEEK | std.os.linux.MSG.DONTWAIT) catch return true;
+        const flags: c_int = @intCast(std.os.linux.MSG.PEEK | std.os.linux.MSG.DONTWAIT);
+        const n = std.c.recv(stream.socket.handle, &b, 1, flags);
+        if (n < 0) return true;
         return n == 0;
     }
 
@@ -811,7 +934,7 @@ pub const HttpServer = struct {
     /// though recycling happens on a handler thread.
     pub fn pushRecycled(self: *HttpServer, conn: *ConnState) void {
         {
-            self.recycled_mutex.lock();
+            while (!self.recycled_mutex.tryLock()) std.Thread.yield() catch {};
             defer self.recycled_mutex.unlock();
             if (self.recycled.items.len >= max_recycled_conns) {
                 self.destroyConn(conn, true);
@@ -823,15 +946,15 @@ pub const HttpServer = struct {
             };
         }
         var b: [1]u8 = .{0};
-        _ = std.posix.write(self.wake_pipe[1], &b) catch {};
+        _ = std.c.write(self.wake_pipe[1], &b, 1);
     }
 
     pub fn deinit(self: *HttpServer) void {
-        if (self.server) |*server| server.deinit();
+        if (self.server) |*server| server.deinit(sio.io());
         while (self.popRecycled()) |conn| self.destroyConn(conn, true);
         self.recycled.deinit();
-        std.posix.close(self.wake_pipe[0]);
-        std.posix.close(self.wake_pipe[1]);
+        _ = std.c.close(self.wake_pipe[0]);
+        _ = std.c.close(self.wake_pipe[1]);
         self.allocator.destroy(self);
     }
 };
@@ -853,8 +976,8 @@ pub const HttpRequest = struct {
     headers: []Header,
     body: []u8,
 
-    pub fn stream(self: *HttpRequest) std.net.Stream {
-        return self.conn.http.connection.stream;
+    pub fn stream(self: *HttpRequest) std.Io.net.Stream {
+        return self.conn.stream;
     }
 
     pub fn freeResources(self: *HttpRequest) void {
@@ -870,8 +993,8 @@ pub const HttpRequest = struct {
 
     /// Release parser state without closing the stream; ownership of the
     /// returned stream transfers to the caller (WebSocket upgrade).
-    pub fn releaseStream(self: *HttpRequest) std.net.Stream {
-        const s = self.conn.http.connection.stream;
+    pub fn releaseStream(self: *HttpRequest) std.Io.net.Stream {
+        const s = self.conn.stream;
         self.server.destroyConn(self.conn, false);
         return s;
     }
@@ -913,9 +1036,9 @@ pub const HttpResponse = struct {
 
     pub fn send(self: *HttpResponse, body: []const u8) !void {
         if (self.sent) return error.ResponseAlreadySent;
-        var head = std.ArrayList(u8).init(self.allocator);
+        var head: std.Io.Writer.Allocating = .init(self.allocator);
         defer head.deinit();
-        const writer = head.writer();
+        const writer = &head.writer;
         try writer.print("HTTP/1.1 {d} {s}\r\ncontent-length: {d}\r\n", .{ self.status, statusText(self.status), body.len });
         try self.headers.write(writer);
         // Framing is explicit (content-length), so the connection may be
@@ -926,7 +1049,7 @@ pub const HttpResponse = struct {
             try writer.writeAll("connection: close\r\n\r\n");
         }
         try writer.writeAll(body);
-        try self.request.stream().writeAll(head.items);
+        try streamWriteAll(self.request.stream(), head.written());
         self.sent = true;
         self.request.response_done = true;
     }
@@ -950,7 +1073,7 @@ pub const HttpStreamResponse = struct {
     /// real operation: without it, bytes may sit in this buffer.
     /// Semantics: writeChunk alone does NOT guarantee delivery; call flush()
     /// (or end the stream) to push.
-    out_buffer: std.ArrayList(u8),
+    out_buffer: std.array_list.Managed(u8),
 
     pub fn init(request: *HttpRequest, status: u16) !*HttpStreamResponse {
         const self = try initDeferred(request, status);
@@ -969,7 +1092,7 @@ pub const HttpStreamResponse = struct {
             .headers = ResponseHeaderBag.init(request.allocator, "text/event-stream"),
             .sent_head = false,
             .ended = false,
-            .out_buffer = std.ArrayList(u8).init(request.allocator),
+            .out_buffer = std.array_list.Managed(u8).init(request.allocator),
         };
         return self;
     }
@@ -981,9 +1104,9 @@ pub const HttpStreamResponse = struct {
 
     pub fn sendHead(self: *HttpStreamResponse, status: u16) !void {
         if (self.sent_head) return;
-        var head = std.ArrayList(u8).init(self.allocator);
+        var head: std.Io.Writer.Allocating = .init(self.allocator);
         defer head.deinit();
-        const writer = head.writer();
+        const writer = &head.writer;
         try writer.print("HTTP/1.1 {d} {s}\r\n", .{ status, statusText(status) });
         try self.headers.write(writer);
         try writer.writeAll("transfer-encoding: chunked\r\n");
@@ -994,7 +1117,7 @@ pub const HttpStreamResponse = struct {
         } else {
             try writer.writeAll("connection: close\r\n\r\n");
         }
-        try self.request.stream().writeAll(head.items);
+        try streamWriteAll(self.request.stream(), head.written());
         self.sent_head = true;
     }
 
@@ -1014,7 +1137,7 @@ pub const HttpStreamResponse = struct {
     pub fn flush(self: *HttpStreamResponse) !void {
         if (!self.sent_head) try self.sendHead(self.status);
         if (self.out_buffer.items.len != 0) {
-            try self.request.stream().writeAll(self.out_buffer.items);
+            try streamWriteAll(self.request.stream(), self.out_buffer.items);
             self.out_buffer.clearRetainingCapacity();
         }
     }
@@ -1023,7 +1146,7 @@ pub const HttpStreamResponse = struct {
         if (self.ended) return;
         if (!self.sent_head) try self.sendHead(self.status);
         try self.flush();
-        try self.request.stream().writeAll("0\r\n\r\n");
+        try streamWriteAll(self.request.stream(), "0\r\n\r\n");
         self.ended = true;
         self.request.response_done = true;
     }
@@ -1037,10 +1160,10 @@ pub const HttpStreamResponse = struct {
 
 pub const WebSocketHandle = struct {
     allocator: std.mem.Allocator,
-    stream: std.net.Stream,
+    stream: std.Io.net.Stream,
     last_message: ?[]u8 = null,
-    incoming: std.ArrayList(u8),
-    fragmented: std.ArrayList(u8),
+    incoming: std.array_list.Managed(u8),
+    fragmented: std.array_list.Managed(u8),
     fragmented_opcode: ?u8 = null,
     pending_write: ?[]u8 = null,
     pending_offset: usize = 0,
@@ -1056,8 +1179,8 @@ pub const WebSocketHandle = struct {
             // Takes over the TCP stream; the HTTP connection is consumed and
             // never recycled for keep-alive.
             .stream = request.releaseStream(),
-            .incoming = std.ArrayList(u8).init(request.allocator),
-            .fragmented = std.ArrayList(u8).init(request.allocator),
+            .incoming = std.array_list.Managed(u8).init(request.allocator),
+            .fragmented = std.array_list.Managed(u8).init(request.allocator),
         };
         return self;
     }
@@ -1073,7 +1196,7 @@ pub const WebSocketHandle = struct {
         if (self.pending_write) |pending| self.allocator.free(pending);
         self.incoming.deinit();
         self.fragmented.deinit();
-        self.stream.close();
+        self.stream.close(sio.io());
         self.allocator.destroy(self);
     }
 };
@@ -1106,12 +1229,48 @@ pub fn headerContainsToken(value: []const u8, token: []const u8) bool {
     return false;
 }
 
-fn writeExact(stream: std.net.Stream, bytes: []const u8) bool {
-    stream.writeAll(bytes) catch return false;
+pub fn streamWriteAll(stream: std.Io.net.Stream, bytes: []const u8) !void {
+    var off: usize = 0;
+    while (off < bytes.len) {
+        const rc = std.c.write(stream.socket.handle, bytes.ptr + off, bytes.len - off);
+        if (rc == 0) return error.BrokenPipe;
+        if (rc < 0) {
+            const e = std.c.errno(rc);
+            if (e == .AGAIN) return error.WouldBlock;
+            return error.ConnectionResetByPeer;
+        }
+        off += @intCast(rc);
+    }
+}
+
+pub fn streamWriteSome(stream: std.Io.net.Stream, bytes: []const u8) !usize {
+    const rc = std.c.write(stream.socket.handle, bytes.ptr, bytes.len);
+    if (rc == 0) return error.BrokenPipe;
+    if (rc < 0) {
+        const e = std.c.errno(rc);
+        if (e == .AGAIN) return error.WouldBlock;
+        return error.ConnectionResetByPeer;
+    }
+    return @intCast(rc);
+}
+
+pub fn streamReadSome(stream: std.Io.net.Stream, buf: []u8) !usize {
+    const rc = std.c.read(stream.socket.handle, buf.ptr, buf.len);
+    if (rc == 0) return 0;
+    if (rc < 0) {
+        const e = std.c.errno(rc);
+        if (e == .AGAIN) return error.WouldBlock;
+        return error.ConnectionResetByPeer;
+    }
+    return @intCast(rc);
+}
+
+fn writeExact(stream: std.Io.net.Stream, bytes: []const u8) bool {
+    streamWriteAll(stream, bytes) catch return false;
     return true;
 }
 
-pub fn writeFrame(stream: std.net.Stream, opcode: u8, payload: []const u8) bool {
+pub fn writeFrame(stream: std.Io.net.Stream, opcode: u8, payload: []const u8) bool {
     const frame_cap = std.math.add(usize, payload.len, 14) catch return false;
     const frame = std.heap.page_allocator.alloc(u8, frame_cap) catch return false;
     defer std.heap.page_allocator.free(frame);
@@ -1237,7 +1396,7 @@ fn replaceLastMessage(handle: *WebSocketHandle, payload: []u8, out_ptr: *?[*]con
 fn flushPendingWrite(handle: *WebSocketHandle) NetworkStatus {
     const pending = handle.pending_write orelse return .ok;
     while (handle.pending_offset < pending.len) {
-        const written = handle.stream.write(pending[handle.pending_offset..]) catch |err| return statusFromError(err);
+        const written = streamWriteSome(handle.stream, pending[handle.pending_offset..]) catch |err| return statusFromError(err);
         if (written == 0) {
             handle.peer_closed = true;
             return .closed;
@@ -1298,7 +1457,7 @@ pub fn pollWebSocketV2(handle: *WebSocketHandle, interests: u32, timeout_ms: u32
     var posix_events: i16 = 0;
     if (interests & PollEvent.readable != 0) posix_events |= std.posix.POLL.IN;
     if (interests & PollEvent.writable != 0) posix_events |= std.posix.POLL.OUT;
-    const poll_status = pollStream(handle.stream, posix_events, timeout_ms, out_events);
+    const poll_status = pollStream(handle.stream.socket.handle, posix_events, timeout_ms, out_events);
     if (poll_status != .ok) return poll_status;
     if (out_events.* & PollEvent.writable != 0 and handle.pending_write != null) {
         const flush_status = flushPendingWrite(handle);
@@ -1399,7 +1558,7 @@ pub fn readFrameV2(handle: *WebSocketHandle, max_len_u64: u64, out_opcode: *u8, 
                     if (frame.payload.len != 0) handle.allocator.free(frame.payload);
                     if (frame.fin) {
                         const message = handle.fragmented.toOwnedSlice() catch return .io_error;
-                        handle.fragmented = std.ArrayList(u8).init(handle.allocator);
+                        handle.fragmented = std.array_list.Managed(u8).init(handle.allocator);
                         handle.fragmented_opcode = null;
                         if (opcode == @intFromEnum(WebSocketOpcode.text) and !std.unicode.utf8ValidateSlice(message)) {
                             if (message.len != 0) handle.allocator.free(message);
@@ -1423,7 +1582,7 @@ pub fn readFrameV2(handle: *WebSocketHandle, max_len_u64: u64, out_opcode: *u8, 
         var buffer: [4096]u8 = undefined;
         const capacity = max_v2_message_bytes + 14 - handle.incoming.items.len;
         const read_len = @min(buffer.len, capacity);
-        const count = handle.stream.read(buffer[0..read_len]) catch |err| return statusFromError(err);
+        const count = streamReadSome(handle.stream, buffer[0..read_len]) catch |err| return statusFromError(err);
         if (count == 0) {
             handle.peer_closed = true;
             return .closed;
@@ -1467,8 +1626,5 @@ pub fn closeWebSocketV2(handle: *WebSocketHandle, code: u16, reason: []const u8)
 }
 
 fn methodStringAlloc(allocator: std.mem.Allocator, method: std.http.Method) ![]u8 {
-    var buf: [24]u8 = undefined;
-    var stream = std.io.fixedBufferStream(&buf);
-    try method.write(stream.writer());
-    return allocator.dupe(u8, stream.getWritten());
+    return allocator.dupe(u8, @tagName(method));
 }
