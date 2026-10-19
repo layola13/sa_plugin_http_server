@@ -58,6 +58,18 @@ pub const sa_http_server_resp_stream_free_v2 = _http_api.sa_http_server_resp_str
 pub const sa_http_server_free_v2 = _http_api.sa_http_server_free_v2;
 pub const sa_http_server_websocket_upgrade_v2 = _http_api.sa_http_server_websocket_upgrade_v2;
 pub const sa_http_server_websocket_poll_v2 = _http_api.sa_http_server_websocket_poll_v2;
+
+// NOTE(Zig 0.17): `export` decls in imported files are dropped unless referenced;
+// force analysis so all @extern ABI symbols are emitted into the artifact.
+comptime {
+    for (std.meta.declarations(_http_api)) |d| {
+        const decl = @field(_http_api, d);
+        switch (@typeInfo(@TypeOf(decl))) {
+            .@"fn" => _ = &decl,
+            else => {},
+        }
+    }
+}
 pub const sa_http_server_websocket_read_v2 = _http_api.sa_http_server_websocket_read_v2;
 pub const sa_http_server_websocket_write_v2 = _http_api.sa_http_server_websocket_write_v2;
 pub const sa_http_server_websocket_close_v2 = _http_api.sa_http_server_websocket_close_v2;
