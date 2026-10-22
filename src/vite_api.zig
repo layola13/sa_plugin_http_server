@@ -282,16 +282,21 @@ pub const ThreadPool = struct {
     max_requests: u64,
     served: std.atomic.Value(u64),
     stopping: std.atomic.Value(bool),
+    done: std.atomic.Value(usize),
 };
 
 fn workerMain(pool: *ThreadPool) void {
     const srv = pool.server;
     while (!pool.stopping.load(.acquire)) {
-        if (pool.max_requests != 0 and pool.served.load(.acquire) >= pool.max_requests) break;
+        if (pool.max_requests != 0 and pool.served.load(.acquire) >= pool.max_requests) {
+            pool.stopping.store(true, .release);
+            break;
+        }
         const req = srv.acceptWorker(&pool.stopping) catch continue;
         _ = pool.served.fetchAdd(1, .acq_rel);
         pool.handler(@ptrCast(req), pool.handler_ctx);
     }
+    _ = pool.done.fetchAdd(1, .acq_rel);
 }
 
 /// Bound on the request-head parse for connections accepted by the plugin
@@ -417,6 +422,7 @@ pub const HttpServer = struct {
             .max_requests = max_requests,
             .served = std.atomic.Value(u64).init(0),
             .stopping = std.atomic.Value(bool).init(false),
+            .done = std.atomic.Value(usize).init(0),
         };
         self.pool = pool;
 
@@ -431,7 +437,14 @@ pub const HttpServer = struct {
                 return err;
             };
         }
-        for (threads) |t| t.join();
+        // The SA host executable exports its own `pthread_join(int32_t, u8*)`,
+        // which interposes libc's pthread_join for dynamically linked plugins.
+        // Calling std.Thread.join here therefore does not wait for the worker
+        // and would free the pool underneath a live thread. Detach instead and
+        // wait on an explicit completion counter that uses only atomics.
+        for (threads) |t| t.detach();
+        while (!pool.stopping.load(.acquire)) std.Io.sleep(sio.io(), .fromMilliseconds(1), .awake) catch {};
+        while (pool.done.load(.acquire) < n) std.Io.sleep(sio.io(), .fromMilliseconds(1), .awake) catch {};
         self.pool = null;
         self.allocator.free(threads);
         self.allocator.destroy(pool);
@@ -719,6 +732,8 @@ pub const HttpServer = struct {
             if (e == .CONNABORTED) return error.ConnectionAborted;
             return error.ConnectionAborted;
         }
+        const one: c_int = 1;
+        std.posix.setsockopt(rc, std.posix.IPPROTO.TCP, 1, std.mem.asBytes(&one)) catch {};
         const accepted: std.Io.net.Stream = .{
             .socket = .{ .handle = @intCast(rc), .address = listener.socket.address },
         };
