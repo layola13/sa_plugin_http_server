@@ -1287,8 +1287,8 @@ fn writeExact(stream: std.Io.net.Stream, bytes: []const u8) bool {
 
 pub fn writeFrame(stream: std.Io.net.Stream, opcode: u8, payload: []const u8) bool {
     const frame_cap = std.math.add(usize, payload.len, 14) catch return false;
-    const frame = std.heap.page_allocator.alloc(u8, frame_cap) catch return false;
-    defer std.heap.page_allocator.free(frame);
+    const frame = std.heap.c_allocator.alloc(u8, frame_cap) catch return false;
+    defer std.heap.c_allocator.free(frame);
     const frame_len = sa_std_net.buildWebSocketFrame(frame, opcode, payload, null) catch return false;
     return writeExact(stream, frame[0..frame_len]);
 }

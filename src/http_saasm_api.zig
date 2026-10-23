@@ -33,10 +33,20 @@ pub const SaHttpStreamResponseHandle = extern struct {
     impl: ?*anyopaque,
 };
 
+/// The HTTP server used to be initialized with `std.heap.page_allocator`, which
+/// issues one `mmap` per small allocation and one `munmap` per free. Under the
+/// SA host that used to be invisible because the host's `munmap` stub was a
+/// no-op, so the process leaked ~55 KB per request. With the stub hidden (see
+/// `sci/src/runtime/sa_std.zig`) those syscalls became real and per-request
+/// throughput collapsed. Use libc malloc so small request objects are pooled.
+fn serverAllocator() std.mem.Allocator {
+    return std.heap.c_allocator;
+}
+
 pub export fn sa_http_server_new(out_server: ?*?*anyopaque) u32 {
     ensureProcessSignalSafety();
     const slot = out_server orelse return @intFromEnum(plugin_api.AbiStatus.failed);
-    const server = HttpServer.init(std.heap.page_allocator) catch return @intFromEnum(plugin_api.AbiStatus.failed);
+    const server = HttpServer.init(serverAllocator()) catch return @intFromEnum(plugin_api.AbiStatus.failed);
     slot.* = @ptrCast(server);
     return @intFromEnum(plugin_api.AbiStatus.ok);
 }
@@ -329,7 +339,7 @@ pub export fn sa_http_server_new_v2(out_server: ?*?*anyopaque) u32 {
     ensureProcessSignalSafety();
     const slot = out_server orelse return networkStatus(.invalid);
     slot.* = null;
-    const server = HttpServer.init(std.heap.page_allocator) catch return networkStatus(.io_error);
+    const server = HttpServer.init(serverAllocator()) catch return networkStatus(.io_error);
     slot.* = @ptrCast(server);
     return networkStatus(.ok);
 }
