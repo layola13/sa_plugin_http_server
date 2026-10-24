@@ -1,5 +1,6 @@
 const std = @import("std");
 const plugin = @import("plugin");
+const core = @import("sa_http_server");
 const plugin_api = @import("plugin_api");
 const sio = @import("sio");
 
@@ -167,8 +168,8 @@ test "http server runtime installs SIGPIPE handler for broken SSE sockets" {
     std.posix.sigaction(std.posix.SIG.PIPE, &default_act, null);
 
     var server: ?*anyopaque = null;
-    try std.testing.expectEqual(@as(u32, 0), plugin.sa_http_server_new(&server));
-    defer _ = plugin.sa_http_server_free(server);
+    try std.testing.expectEqual(@as(u32, 0), core.sa_http_server_new(&server));
+    defer _ = core.sa_http_server_free(server);
 
     var installed: std.posix.Sigaction = undefined;
     std.posix.sigaction(std.posix.SIG.PIPE, null, &installed);
@@ -178,11 +179,11 @@ test "http server runtime installs SIGPIPE handler for broken SSE sockets" {
 test "http server saasm api exposes request method" {
     const port: u16 = 18082;
     var server: ?*anyopaque = null;
-    try std.testing.expectEqual(@as(u32, 0), plugin.sa_http_server_new(&server));
-    defer _ = plugin.sa_http_server_free(server);
+    try std.testing.expectEqual(@as(u32, 0), core.sa_http_server_new(&server));
+    defer _ = core.sa_http_server_free(server);
 
     const host = "127.0.0.1";
-    try std.testing.expectEqual(@as(u32, 0), plugin.sa_http_server_start(server, host.ptr, host.len, port));
+    try std.testing.expectEqual(@as(u32, 0), core.sa_http_server_start(server, host.ptr, host.len, port));
 
     const client_thread = try std.Thread.spawn(.{}, struct {
         fn run() !void {
@@ -208,19 +209,19 @@ test "http server saasm api exposes request method" {
     }.run, .{});
 
     var req: ?*anyopaque = null;
-    try std.testing.expectEqual(@as(u32, 0), plugin.sa_http_server_accept(server, &req));
-    defer _ = plugin.sa_http_server_req_free(req);
+    try std.testing.expectEqual(@as(u32, 0), core.sa_http_server_accept(server, &req));
+    defer _ = core.sa_http_server_req_free(req);
 
     var method_ptr: ?[*]const u8 = null;
     var method_len: u64 = 0;
-    try std.testing.expectEqual(@as(u32, 0), plugin.sa_http_server_req_get_method(req, &method_ptr, &method_len));
+    try std.testing.expectEqual(@as(u32, 0), core.sa_http_server_req_get_method(req, &method_ptr, &method_len));
     try std.testing.expectEqualStrings("POST", (method_ptr orelse return error.NullMethod)[0..@intCast(method_len)]);
 
     var resp: ?*anyopaque = null;
     const body = "ok";
-    try std.testing.expectEqual(@as(u32, 0), plugin.sa_http_server_resp_new(req, 200, &resp));
-    try std.testing.expectEqual(@as(u32, 0), plugin.sa_http_server_resp_send(resp, body.ptr, body.len));
-    _ = plugin.sa_http_server_resp_free(resp);
+    try std.testing.expectEqual(@as(u32, 0), core.sa_http_server_resp_new(req, 200, &resp));
+    try std.testing.expectEqual(@as(u32, 0), core.sa_http_server_resp_send(resp, body.ptr, body.len));
+    _ = core.sa_http_server_resp_free(resp);
 
     client_thread.join();
 }
@@ -228,11 +229,11 @@ test "http server saasm api exposes request method" {
 test "http server saasm api can send typed plain response" {
     const port: u16 = 18083;
     var server: ?*anyopaque = null;
-    try std.testing.expectEqual(@as(u32, 0), plugin.sa_http_server_new(&server));
-    defer _ = plugin.sa_http_server_free(server);
+    try std.testing.expectEqual(@as(u32, 0), core.sa_http_server_new(&server));
+    defer _ = core.sa_http_server_free(server);
 
     const host = "127.0.0.1";
-    try std.testing.expectEqual(@as(u32, 0), plugin.sa_http_server_start(server, host.ptr, host.len, port));
+    try std.testing.expectEqual(@as(u32, 0), core.sa_http_server_start(server, host.ptr, host.len, port));
 
     const client_thread = try std.Thread.spawn(.{}, struct {
         fn run() !void {
@@ -262,16 +263,16 @@ test "http server saasm api can send typed plain response" {
     }.run, .{});
 
     var req: ?*anyopaque = null;
-    try std.testing.expectEqual(@as(u32, 0), plugin.sa_http_server_accept(server, &req));
-    defer _ = plugin.sa_http_server_req_free(req);
+    try std.testing.expectEqual(@as(u32, 0), core.sa_http_server_accept(server, &req));
+    defer _ = core.sa_http_server_req_free(req);
 
     var resp: ?*anyopaque = null;
     const body = "{}";
     const content_type = "application/json";
-    try std.testing.expectEqual(@as(u32, 0), plugin.sa_http_server_resp_new(req, 418, &resp));
-    try std.testing.expectEqual(@as(u32, 0), plugin.sa_http_server_resp_set_content_type(resp, content_type.ptr, content_type.len));
-    try std.testing.expectEqual(@as(u32, 0), plugin.sa_http_server_resp_send(resp, body.ptr, body.len));
-    _ = plugin.sa_http_server_resp_free(resp);
+    try std.testing.expectEqual(@as(u32, 0), core.sa_http_server_resp_new(req, 418, &resp));
+    try std.testing.expectEqual(@as(u32, 0), core.sa_http_server_resp_set_content_type(resp, content_type.ptr, content_type.len));
+    try std.testing.expectEqual(@as(u32, 0), core.sa_http_server_resp_send(resp, body.ptr, body.len));
+    _ = core.sa_http_server_resp_free(resp);
 
     client_thread.join();
 }
@@ -279,11 +280,11 @@ test "http server saasm api can send typed plain response" {
 test "http server saasm api accepts null pointer for zero-length body" {
     const port: u16 = 18084;
     var server: ?*anyopaque = null;
-    try std.testing.expectEqual(@as(u32, 0), plugin.sa_http_server_new(&server));
-    defer _ = plugin.sa_http_server_free(server);
+    try std.testing.expectEqual(@as(u32, 0), core.sa_http_server_new(&server));
+    defer _ = core.sa_http_server_free(server);
 
     const host = "127.0.0.1";
-    try std.testing.expectEqual(@as(u32, 0), plugin.sa_http_server_start(server, host.ptr, host.len, port));
+    try std.testing.expectEqual(@as(u32, 0), core.sa_http_server_start(server, host.ptr, host.len, port));
 
     const client_thread = try std.Thread.spawn(.{}, struct {
         fn run() !void {
@@ -312,13 +313,13 @@ test "http server saasm api accepts null pointer for zero-length body" {
     }.run, .{});
 
     var req: ?*anyopaque = null;
-    try std.testing.expectEqual(@as(u32, 0), plugin.sa_http_server_accept(server, &req));
-    defer _ = plugin.sa_http_server_req_free(req);
+    try std.testing.expectEqual(@as(u32, 0), core.sa_http_server_accept(server, &req));
+    defer _ = core.sa_http_server_req_free(req);
 
     var resp: ?*anyopaque = null;
-    try std.testing.expectEqual(@as(u32, 0), plugin.sa_http_server_resp_new(req, 204, &resp));
-    try std.testing.expectEqual(@as(u32, 0), plugin.sa_http_server_resp_send(resp, null, 0));
-    _ = plugin.sa_http_server_resp_free(resp);
+    try std.testing.expectEqual(@as(u32, 0), core.sa_http_server_resp_new(req, 204, &resp));
+    try std.testing.expectEqual(@as(u32, 0), core.sa_http_server_resp_send(resp, null, 0));
+    _ = core.sa_http_server_resp_free(resp);
 
     client_thread.join();
 }
@@ -467,31 +468,31 @@ fn sendPartialHttpRequest(port: u16) void {
 }
 
 test "http server v2 status codes and pollable accept are stable" {
-    try std.testing.expectEqual(@as(u32, 0), @intFromEnum(plugin.NetworkStatus.ok));
-    try std.testing.expectEqual(@as(u32, 1), @intFromEnum(plugin.NetworkStatus.would_block));
-    try std.testing.expectEqual(@as(u32, 2), @intFromEnum(plugin.NetworkStatus.closed));
-    try std.testing.expectEqual(@as(u32, 3), @intFromEnum(plugin.NetworkStatus.timeout));
-    try std.testing.expectEqual(@as(u32, 4), @intFromEnum(plugin.NetworkStatus.too_large));
-    try std.testing.expectEqual(@as(u32, 5), @intFromEnum(plugin.NetworkStatus.invalid));
-    try std.testing.expectEqual(@as(u32, 6), @intFromEnum(plugin.NetworkStatus.io_error));
+    try std.testing.expectEqual(@as(u32, 0), @intFromEnum(core.NetworkStatus.ok));
+    try std.testing.expectEqual(@as(u32, 1), @intFromEnum(core.NetworkStatus.would_block));
+    try std.testing.expectEqual(@as(u32, 2), @intFromEnum(core.NetworkStatus.closed));
+    try std.testing.expectEqual(@as(u32, 3), @intFromEnum(core.NetworkStatus.timeout));
+    try std.testing.expectEqual(@as(u32, 4), @intFromEnum(core.NetworkStatus.too_large));
+    try std.testing.expectEqual(@as(u32, 5), @intFromEnum(core.NetworkStatus.invalid));
+    try std.testing.expectEqual(@as(u32, 6), @intFromEnum(core.NetworkStatus.io_error));
 
     var server: ?*anyopaque = null;
-    try std.testing.expectEqual(@as(u32, 0), plugin.sa_http_server_new_v2(&server));
-    defer _ = plugin.sa_http_server_free_v2(server);
+    try std.testing.expectEqual(@as(u32, 0), core.sa_http_server_new_v2(&server));
+    defer _ = core.sa_http_server_free_v2(server);
     const host = "127.0.0.1";
-    try std.testing.expectEqual(@as(u32, 0), plugin.sa_http_server_start_v2(server, host.ptr, host.len, 18085));
+    try std.testing.expectEqual(@as(u32, 0), core.sa_http_server_start_v2(server, host.ptr, host.len, 18085));
 
     var req: ?*anyopaque = @ptrFromInt(1);
-    try std.testing.expectEqual(@as(u32, 1), plugin.sa_http_server_accept_v2(server, 0, &req));
+    try std.testing.expectEqual(@as(u32, 1), core.sa_http_server_accept_v2(server, 0, &req));
     try std.testing.expectEqual(@as(?*anyopaque, null), req);
     req = @ptrFromInt(1);
-    try std.testing.expectEqual(@as(u32, 3), plugin.sa_http_server_accept_v2(server, 10, &req));
+    try std.testing.expectEqual(@as(u32, 3), core.sa_http_server_accept_v2(server, 10, &req));
     try std.testing.expectEqual(@as(?*anyopaque, null), req);
 
     const partial_thread = try std.Thread.spawn(.{}, sendPartialHttpRequest, .{@as(u16, 18085)});
     var partial_joined = false;
     defer if (!partial_joined) partial_thread.join();
-    try std.testing.expectEqual(@as(u32, 3), plugin.sa_http_server_accept_v2(server, 25, &req));
+    try std.testing.expectEqual(@as(u32, 3), core.sa_http_server_accept_v2(server, 25, &req));
     try std.testing.expectEqual(@as(?*anyopaque, null), req);
     partial_thread.join();
     partial_joined = true;
@@ -504,12 +505,12 @@ test "http server v2 status codes and pollable accept are stable" {
     });
     var client_joined = false;
     defer if (!client_joined) client_thread.join();
-    try std.testing.expectEqual(@as(u32, 0), plugin.sa_http_server_accept_v2(server, 1000, &req));
-    defer _ = plugin.sa_http_server_req_free_v2(req);
+    try std.testing.expectEqual(@as(u32, 0), core.sa_http_server_accept_v2(server, 1000, &req));
+    defer _ = core.sa_http_server_req_free_v2(req);
     var resp: ?*anyopaque = null;
-    try std.testing.expectEqual(@as(u32, 0), plugin.sa_http_server_resp_new_v2(req, 204, &resp));
-    defer _ = plugin.sa_http_server_resp_free_v2(resp);
-    try std.testing.expectEqual(@as(u32, 0), plugin.sa_http_server_resp_send_v2(resp, null, 0, 1000));
+    try std.testing.expectEqual(@as(u32, 0), core.sa_http_server_resp_new_v2(req, 204, &resp));
+    defer _ = core.sa_http_server_resp_free_v2(resp);
+    try std.testing.expectEqual(@as(u32, 0), core.sa_http_server_resp_send_v2(resp, null, 0, 1000));
     client_thread.join();
     client_joined = true;
     try std.testing.expect(!capture.failed);
@@ -518,10 +519,10 @@ test "http server v2 status codes and pollable accept are stable" {
 
 test "http server v2 owns arbitrary response headers and enforces the message cap" {
     var server: ?*anyopaque = null;
-    try std.testing.expectEqual(@as(u32, 0), plugin.sa_http_server_new_v2(&server));
-    defer _ = plugin.sa_http_server_free_v2(server);
+    try std.testing.expectEqual(@as(u32, 0), core.sa_http_server_new_v2(&server));
+    defer _ = core.sa_http_server_free_v2(server);
     const host = "127.0.0.1";
-    try std.testing.expectEqual(@as(u32, 0), plugin.sa_http_server_start_v2(server, host.ptr, host.len, 18086));
+    try std.testing.expectEqual(@as(u32, 0), core.sa_http_server_start_v2(server, host.ptr, host.len, 18086));
 
     var capture = ClientCapture{};
     const client_thread = try std.Thread.spawn(.{}, captureHttpResponse, .{
@@ -533,29 +534,29 @@ test "http server v2 owns arbitrary response headers and enforces the message ca
     defer if (!client_joined) client_thread.join();
 
     var req: ?*anyopaque = null;
-    try std.testing.expectEqual(@as(u32, 0), plugin.sa_http_server_accept_v2(server, 1000, &req));
-    defer _ = plugin.sa_http_server_req_free_v2(req);
+    try std.testing.expectEqual(@as(u32, 0), core.sa_http_server_accept_v2(server, 1000, &req));
+    defer _ = core.sa_http_server_req_free_v2(req);
     var resp: ?*anyopaque = null;
-    try std.testing.expectEqual(@as(u32, 0), plugin.sa_http_server_resp_new_v2(req, 200, &resp));
-    defer _ = plugin.sa_http_server_resp_free_v2(resp);
+    try std.testing.expectEqual(@as(u32, 0), core.sa_http_server_resp_new_v2(req, 200, &resp));
+    defer _ = core.sa_http_server_resp_free_v2(resp);
 
     const header_name = "x-codex-max";
     var header_value = [_]u8{ 'r', 'e', 'a', 'd', 'y' };
-    try std.testing.expectEqual(@as(u32, 0), plugin.sa_http_server_resp_add_header_v2(resp, header_name.ptr, header_name.len, header_value[0..].ptr, header_value.len));
+    try std.testing.expectEqual(@as(u32, 0), core.sa_http_server_resp_add_header_v2(resp, header_name.ptr, header_name.len, header_value[0..].ptr, header_value.len));
     header_value[0] = 'X';
     const cookie_name = "set-cookie";
     const cookie_a = "a=1";
     const cookie_b = "b=2";
-    try std.testing.expectEqual(@as(u32, 0), plugin.sa_http_server_resp_add_header_v2(resp, cookie_name.ptr, cookie_name.len, cookie_a.ptr, cookie_a.len));
-    try std.testing.expectEqual(@as(u32, 0), plugin.sa_http_server_resp_add_header_v2(resp, cookie_name.ptr, cookie_name.len, cookie_b.ptr, cookie_b.len));
+    try std.testing.expectEqual(@as(u32, 0), core.sa_http_server_resp_add_header_v2(resp, cookie_name.ptr, cookie_name.len, cookie_a.ptr, cookie_a.len));
+    try std.testing.expectEqual(@as(u32, 0), core.sa_http_server_resp_add_header_v2(resp, cookie_name.ptr, cookie_name.len, cookie_b.ptr, cookie_b.len));
     const injected = "ok\r\nx-injected: yes";
-    try std.testing.expectEqual(@as(u32, 5), plugin.sa_http_server_resp_add_header_v2(resp, header_name.ptr, header_name.len, injected.ptr, injected.len));
+    try std.testing.expectEqual(@as(u32, 5), core.sa_http_server_resp_add_header_v2(resp, header_name.ptr, header_name.len, injected.ptr, injected.len));
 
-    const oversized = try std.testing.allocator.alloc(u8, plugin.max_v2_message_bytes + 1);
+    const oversized = try std.testing.allocator.alloc(u8, core.max_v2_message_bytes + 1);
     defer std.testing.allocator.free(oversized);
-    try std.testing.expectEqual(@as(u32, 4), plugin.sa_http_server_resp_send_v2(resp, oversized.ptr, oversized.len, 0));
+    try std.testing.expectEqual(@as(u32, 4), core.sa_http_server_resp_send_v2(resp, oversized.ptr, oversized.len, 0));
     const body = "ok";
-    try std.testing.expectEqual(@as(u32, 0), plugin.sa_http_server_resp_send_v2(resp, body.ptr, body.len, 1000));
+    try std.testing.expectEqual(@as(u32, 0), core.sa_http_server_resp_send_v2(resp, body.ptr, body.len, 1000));
 
     client_thread.join();
     client_joined = true;
@@ -627,10 +628,10 @@ fn websocketV2Client(port: u16, state: *WsClientState) void {
 
 test "http server v2 websocket polls fragmented messages and performs protocol close" {
     var server: ?*anyopaque = null;
-    try std.testing.expectEqual(@as(u32, 0), plugin.sa_http_server_new_v2(&server));
-    defer _ = plugin.sa_http_server_free_v2(server);
+    try std.testing.expectEqual(@as(u32, 0), core.sa_http_server_new_v2(&server));
+    defer _ = core.sa_http_server_free_v2(server);
     const host = "127.0.0.1";
-    try std.testing.expectEqual(@as(u32, 0), plugin.sa_http_server_start_v2(server, host.ptr, host.len, 18087));
+    try std.testing.expectEqual(@as(u32, 0), core.sa_http_server_start_v2(server, host.ptr, host.len, 18087));
 
     var client_state = WsClientState{};
     const client_thread = try std.Thread.spawn(.{}, websocketV2Client, .{ @as(u16, 18087), &client_state });
@@ -638,35 +639,35 @@ test "http server v2 websocket polls fragmented messages and performs protocol c
     defer if (!client_joined) client_thread.join();
 
     var req: ?*anyopaque = null;
-    try std.testing.expectEqual(@as(u32, 0), plugin.sa_http_server_accept_v2(server, 1000, &req));
+    try std.testing.expectEqual(@as(u32, 0), core.sa_http_server_accept_v2(server, 1000, &req));
     var ws: ?*anyopaque = null;
-    try std.testing.expectEqual(@as(u32, 0), plugin.sa_http_server_websocket_upgrade_v2(req, &ws));
-    defer _ = plugin.sa_http_server_websocket_free_v2(ws);
+    try std.testing.expectEqual(@as(u32, 0), core.sa_http_server_websocket_upgrade_v2(req, &ws));
+    defer _ = core.sa_http_server_websocket_free_v2(ws);
 
     var events: u32 = 99;
-    try std.testing.expectEqual(@as(u32, 1), plugin.sa_http_server_websocket_poll_v2(ws, plugin.PollEvent.readable, 0, &events));
+    try std.testing.expectEqual(@as(u32, 1), core.sa_http_server_websocket_poll_v2(ws, core.PollEvent.readable, 0, &events));
     try std.testing.expectEqual(@as(u32, 0), events);
-    try std.testing.expectEqual(@as(u32, 0), plugin.sa_http_server_websocket_poll_v2(ws, plugin.PollEvent.readable, 1000, &events));
-    try std.testing.expect(events & plugin.PollEvent.readable != 0);
+    try std.testing.expectEqual(@as(u32, 0), core.sa_http_server_websocket_poll_v2(ws, core.PollEvent.readable, 1000, &events));
+    try std.testing.expect(events & core.PollEvent.readable != 0);
 
     var opcode: u8 = 0;
     var message_ptr: ?[*]const u8 = null;
     var message_len: u64 = 0;
-    try std.testing.expectEqual(@as(u32, 0), plugin.sa_http_server_websocket_read_v2(ws, plugin.max_v2_message_bytes, &opcode, &message_ptr, &message_len));
+    try std.testing.expectEqual(@as(u32, 0), core.sa_http_server_websocket_read_v2(ws, core.max_v2_message_bytes, &opcode, &message_ptr, &message_len));
     try std.testing.expectEqual(@as(u8, 1), opcode);
     try std.testing.expectEqualStrings("hello", (message_ptr orelse return error.NullMessage)[0..@intCast(message_len)]);
 
-    const oversized = try std.testing.allocator.alloc(u8, plugin.max_v2_message_bytes + 1);
+    const oversized = try std.testing.allocator.alloc(u8, core.max_v2_message_bytes + 1);
     defer std.testing.allocator.free(oversized);
     var written: u64 = 99;
-    try std.testing.expectEqual(@as(u32, 4), plugin.sa_http_server_websocket_write_v2(ws, 1, oversized.ptr, oversized.len, &written));
+    try std.testing.expectEqual(@as(u32, 4), core.sa_http_server_websocket_write_v2(ws, 1, oversized.ptr, oversized.len, &written));
     try std.testing.expectEqual(@as(u64, 0), written);
     const reply = "ok";
-    try std.testing.expectEqual(@as(u32, 0), plugin.sa_http_server_websocket_write_v2(ws, 1, reply.ptr, reply.len, &written));
+    try std.testing.expectEqual(@as(u32, 0), core.sa_http_server_websocket_write_v2(ws, 1, reply.ptr, reply.len, &written));
     try std.testing.expectEqual(@as(u64, reply.len), written);
     const reason = "done";
-    try std.testing.expectEqual(@as(u32, 0), plugin.sa_http_server_websocket_close_v2(ws, 1000, reason.ptr, reason.len));
-    try std.testing.expectEqual(@as(u32, 2), plugin.sa_http_server_websocket_write_v2(ws, 1, reply.ptr, reply.len, &written));
+    try std.testing.expectEqual(@as(u32, 0), core.sa_http_server_websocket_close_v2(ws, 1000, reason.ptr, reason.len));
+    try std.testing.expectEqual(@as(u32, 2), core.sa_http_server_websocket_write_v2(ws, 1, reply.ptr, reply.len, &written));
     try std.testing.expectEqual(@as(u64, 0), written);
 
     client_thread.join();
@@ -717,10 +718,10 @@ fn websocketBackpressureClient(port: u16, state: *BackpressureClientState) void 
 
 test "http server v2 websocket reports and recovers from bounded backpressure" {
     var server: ?*anyopaque = null;
-    try std.testing.expectEqual(@as(u32, 0), plugin.sa_http_server_new_v2(&server));
-    defer _ = plugin.sa_http_server_free_v2(server);
+    try std.testing.expectEqual(@as(u32, 0), core.sa_http_server_new_v2(&server));
+    defer _ = core.sa_http_server_free_v2(server);
     const host = "127.0.0.1";
-    try std.testing.expectEqual(@as(u32, 0), plugin.sa_http_server_start_v2(server, host.ptr, host.len, 18088));
+    try std.testing.expectEqual(@as(u32, 0), core.sa_http_server_start_v2(server, host.ptr, host.len, 18088));
 
     var client_state = BackpressureClientState{};
     const client_thread = try std.Thread.spawn(.{}, websocketBackpressureClient, .{ @as(u16, 18088), &client_state });
@@ -728,15 +729,15 @@ test "http server v2 websocket reports and recovers from bounded backpressure" {
     defer if (!client_joined) client_thread.join();
 
     var req: ?*anyopaque = null;
-    try std.testing.expectEqual(@as(u32, 0), plugin.sa_http_server_accept_v2(server, 1000, &req));
+    try std.testing.expectEqual(@as(u32, 0), core.sa_http_server_accept_v2(server, 1000, &req));
     var ws: ?*anyopaque = null;
-    try std.testing.expectEqual(@as(u32, 0), plugin.sa_http_server_websocket_upgrade_v2(req, &ws));
+    try std.testing.expectEqual(@as(u32, 0), core.sa_http_server_websocket_upgrade_v2(req, &ws));
     var ws_live = true;
     defer {
-        if (ws_live) _ = plugin.sa_http_server_websocket_free_v2(ws);
+        if (ws_live) _ = core.sa_http_server_websocket_free_v2(ws);
     }
 
-    const handle = @as(*plugin.WebSocketHandle, @ptrCast(@alignCast(ws orelse return error.NullWebSocket)));
+    const handle = @as(*core.WebSocketHandle, @ptrCast(@alignCast(ws orelse return error.NullWebSocket)));
     const send_buffer_size: c_int = 4096;
     try std.posix.setsockopt(handle.stream.socket.handle, std.posix.SOL.SOCKET, std.posix.SO.SNDBUF, std.mem.asBytes(&send_buffer_size));
 
@@ -745,12 +746,12 @@ test "http server v2 websocket reports and recovers from bounded backpressure" {
     defer std.testing.allocator.free(payload);
     @memset(payload, 'x');
     var written: u64 = 0;
-    try std.testing.expectEqual(@as(u32, 0), plugin.sa_http_server_websocket_write_v2(ws, 2, payload.ptr, payload.len, &written));
+    try std.testing.expectEqual(@as(u32, 0), core.sa_http_server_websocket_write_v2(ws, 2, payload.ptr, payload.len, &written));
     try std.testing.expectEqual(@as(u64, payload.len), written);
     var saw_backpressure = false;
     var attempt: usize = 0;
     while (attempt < 256) : (attempt += 1) {
-        const status = plugin.sa_http_server_websocket_write_v2(ws, 2, payload.ptr, payload.len, &written);
+        const status = core.sa_http_server_websocket_write_v2(ws, 2, payload.ptr, payload.len, &written);
         if (status == 1) {
             try std.testing.expectEqual(@as(u64, 0), written);
             saw_backpressure = true;
@@ -762,14 +763,14 @@ test "http server v2 websocket reports and recovers from bounded backpressure" {
     try std.testing.expect(saw_backpressure);
 
     var events: u32 = 0;
-    try std.testing.expectEqual(@as(u32, 1), plugin.sa_http_server_websocket_poll_v2(ws, plugin.PollEvent.writable, 0, &events));
+    try std.testing.expectEqual(@as(u32, 1), core.sa_http_server_websocket_poll_v2(ws, core.PollEvent.writable, 0, &events));
     try std.testing.expectEqual(@as(u32, 0), events);
 
     var recovered = false;
     attempt = 0;
     while (attempt < 20) : (attempt += 1) {
-        const status = plugin.sa_http_server_websocket_poll_v2(ws, plugin.PollEvent.writable, 250, &events);
-        if (status == 0 and events & plugin.PollEvent.writable != 0) {
+        const status = core.sa_http_server_websocket_poll_v2(ws, core.PollEvent.writable, 250, &events);
+        if (status == 0 and events & core.PollEvent.writable != 0) {
             recovered = true;
             break;
         }
@@ -777,7 +778,7 @@ test "http server v2 websocket reports and recovers from bounded backpressure" {
     }
     try std.testing.expect(recovered);
 
-    try std.testing.expectEqual(@as(u32, 0), plugin.sa_http_server_websocket_free_v2(ws));
+    try std.testing.expectEqual(@as(u32, 0), core.sa_http_server_websocket_free_v2(ws));
     ws_live = false;
     client_thread.join();
     client_joined = true;
@@ -836,24 +837,24 @@ fn setRecvTimeoutMs(stream: TestStream, ms: u32) void {
 /// when accept itself failed (e.g. oversize body was rejected).
 fn serveOne(server: ?*anyopaque) bool {
     var req: ?*anyopaque = null;
-    if (plugin.sa_http_server_accept(server, &req) != 0) return false;
+    if (core.sa_http_server_accept(server, &req) != 0) return false;
     var path_ptr: ?[*]const u8 = null;
     var path_len: u64 = 0;
-    _ = plugin.sa_http_server_req_get_path(req, &path_ptr, &path_len);
+    _ = core.sa_http_server_req_get_path(req, &path_ptr, &path_len);
     var body_ptr: ?[*]const u8 = null;
     var body_len: u64 = 0;
-    _ = plugin.sa_http_server_req_get_body(req, &body_ptr, &body_len);
+    _ = core.sa_http_server_req_get_body(req, &body_ptr, &body_len);
     var resp: ?*anyopaque = null;
-    if (plugin.sa_http_server_resp_new(req, 200, &resp) != 0) {
-        _ = plugin.sa_http_server_req_free(req);
+    if (core.sa_http_server_resp_new(req, 200, &resp) != 0) {
+        _ = core.sa_http_server_req_free(req);
         return true;
     }
     var out: [256]u8 = undefined;
     const path = if (path_ptr) |p| p[0..@intCast(path_len)] else "";
     const msg = std.fmt.bufPrint(&out, "path={s} bodylen={d}", .{ path, body_len }) catch "err";
-    _ = plugin.sa_http_server_resp_send(resp, msg.ptr, msg.len);
-    _ = plugin.sa_http_server_resp_free(resp);
-    _ = plugin.sa_http_server_req_free(req);
+    _ = core.sa_http_server_resp_send(resp, msg.ptr, msg.len);
+    _ = core.sa_http_server_resp_free(resp);
+    _ = core.sa_http_server_req_free(req);
     return true;
 }
 
@@ -866,17 +867,17 @@ fn serveN(args: ServeNArgs) void {
 
 fn startV1Server(port: u16) !?*anyopaque {
     var server: ?*anyopaque = null;
-    try std.testing.expectEqual(@as(u32, 0), plugin.sa_http_server_new(&server));
-    errdefer _ = plugin.sa_http_server_free(server);
+    try std.testing.expectEqual(@as(u32, 0), core.sa_http_server_new(&server));
+    errdefer _ = core.sa_http_server_free(server);
     const host = "127.0.0.1";
-    try std.testing.expectEqual(@as(u32, 0), plugin.sa_http_server_start(server, host.ptr, host.len, port));
+    try std.testing.expectEqual(@as(u32, 0), core.sa_http_server_start(server, host.ptr, host.len, port));
     return server;
 }
 
 test "http server keep-alive serves sequential requests on one connection" {
     const port: u16 = 18090;
     const server = try startV1Server(port);
-    defer _ = plugin.sa_http_server_free(server);
+    defer _ = core.sa_http_server_free(server);
     const serve_thread = try std.Thread.spawn(.{}, serveN, .{ServeNArgs{ .server = server, .n = 2 }});
     defer serve_thread.join();
 
@@ -899,7 +900,7 @@ test "http server keep-alive serves sequential requests on one connection" {
 test "http server keep-alive carries POST bodies across requests" {
     const port: u16 = 18091;
     const server = try startV1Server(port);
-    defer _ = plugin.sa_http_server_free(server);
+    defer _ = core.sa_http_server_free(server);
     const serve_thread = try std.Thread.spawn(.{}, serveN, .{ServeNArgs{ .server = server, .n = 2 }});
     defer serve_thread.join();
 
@@ -919,7 +920,7 @@ test "http server keep-alive carries POST bodies across requests" {
 test "http server http10 defaults to close and http11 close header closes" {
     const port: u16 = 18092;
     const server = try startV1Server(port);
-    defer _ = plugin.sa_http_server_free(server);
+    defer _ = core.sa_http_server_free(server);
     const serve_thread = try std.Thread.spawn(.{}, serveN, .{ServeNArgs{ .server = server, .n = 2 }});
     defer serve_thread.join();
 
@@ -950,21 +951,21 @@ const FlushState = struct {
 
 fn flushServerFn(state: *FlushState) void {
     var req: ?*anyopaque = null;
-    if (plugin.sa_http_server_accept(state.server, &req) != 0) return;
+    if (core.sa_http_server_accept(state.server, &req) != 0) return;
     var sresp: ?*anyopaque = null;
-    if (plugin.sa_http_server_resp_stream_new(req, 200, &sresp) != 0) {
-        _ = plugin.sa_http_server_req_free(req);
+    if (core.sa_http_server_resp_stream_new(req, 200, &sresp) != 0) {
+        _ = core.sa_http_server_req_free(req);
         return;
     }
     const chunk = "data: one\n\n";
-    _ = plugin.sa_http_server_resp_stream_write(sresp, chunk.ptr, chunk.len);
+    _ = core.sa_http_server_resp_stream_write(sresp, chunk.ptr, chunk.len);
     state.chunk_written.store(true, .release);
     while (!state.do_flush.load(.acquire)) msSleep(1);
-    _ = plugin.sa_http_server_resp_stream_flush(sresp);
+    _ = core.sa_http_server_resp_stream_flush(sresp);
     while (!state.do_end.load(.acquire)) msSleep(1);
-    _ = plugin.sa_http_server_resp_stream_end(sresp);
-    _ = plugin.sa_http_server_resp_stream_free(sresp);
-    _ = plugin.sa_http_server_req_free(req);
+    _ = core.sa_http_server_resp_stream_end(sresp);
+    _ = core.sa_http_server_resp_stream_free(sresp);
+    _ = core.sa_http_server_req_free(req);
     // Chunked keep-alive: a second request must work on the same connection.
     _ = serveOne(state.server);
     state.finished.store(true, .release);
@@ -973,7 +974,7 @@ fn flushServerFn(state: *FlushState) void {
 test "http server stream flush is real and chunked connections are reusable" {
     const port: u16 = 18093;
     const server = try startV1Server(port);
-    defer _ = plugin.sa_http_server_free(server);
+    defer _ = core.sa_http_server_free(server);
     var state = FlushState{ .server = server };
     const serve_thread = try std.Thread.spawn(.{}, flushServerFn, .{&state});
     defer serve_thread.join();
@@ -1033,21 +1034,21 @@ fn threadedHandler(req: ?*anyopaque, ctx: ?*anyopaque) callconv(.c) void {
     const st: *ThreadedState = @ptrCast(@alignCast(ctx.?));
     const r = req.?;
     var resp: ?*anyopaque = null;
-    if (plugin.sa_http_server_resp_new(r, 200, &resp) != 0) {
-        _ = plugin.sa_http_server_req_free(r);
+    if (core.sa_http_server_resp_new(r, 200, &resp) != 0) {
+        _ = core.sa_http_server_req_free(r);
         return;
     }
     const body = "threaded-ok";
-    _ = plugin.sa_http_server_resp_send(resp, body.ptr, body.len);
-    _ = plugin.sa_http_server_resp_free(resp);
-    _ = plugin.sa_http_server_req_free(r);
+    _ = core.sa_http_server_resp_send(resp, body.ptr, body.len);
+    _ = core.sa_http_server_resp_free(resp);
+    _ = core.sa_http_server_req_free(r);
     _ = st.count.fetchAdd(1, .acq_rel);
 }
 
 const ThreadedServeArgs = struct { server: ?*anyopaque, state: *ThreadedState };
 
 fn threadedServeFn(args: ThreadedServeArgs) void {
-    _ = plugin.sa_http_server_serve_threaded(args.server, 4, threadedHandler, @ptrCast(args.state), 0);
+    _ = core.sa_http_server_serve_threaded(args.server, 4, threadedHandler, @ptrCast(args.state), 0);
 }
 
 const ThreadedClientArgs = struct { port: u16, n: usize, ok: *std.atomic.Value(u64) };
@@ -1086,21 +1087,21 @@ test "http server serve_threaded runs a fixed worker pool for concurrent clients
     for (&clients) |*t| t.join();
 
     try std.testing.expectEqual(@as(u64, nclients * per_client), ok.load(.acquire));
-    try std.testing.expectEqual(@as(u32, 0), plugin.sa_http_server_stop_serving(server));
+    try std.testing.expectEqual(@as(u32, 0), core.sa_http_server_stop_serving(server));
     serve_thread.join();
     try std.testing.expectEqual(@as(u64, nclients * per_client), state.count.load(.acquire));
-    _ = plugin.sa_http_server_free(server);
+    _ = core.sa_http_server_free(server);
 }
 
 test "http server set_max_body_bytes enforces the v1 limit" {
     const port: u16 = 18095;
     const server = try startV1Server(port);
-    defer _ = plugin.sa_http_server_free(server);
+    defer _ = core.sa_http_server_free(server);
 
     const failed = @intFromEnum(plugin_api.AbiStatus.failed);
-    try std.testing.expectEqual(failed, plugin.sa_http_server_set_max_body_bytes(server, 0));
-    try std.testing.expectEqual(failed, plugin.sa_http_server_set_max_body_bytes(server, 2 * 1024 * 1024 * 1024));
-    try std.testing.expectEqual(@as(u32, 0), plugin.sa_http_server_set_max_body_bytes(server, 16));
+    try std.testing.expectEqual(failed, core.sa_http_server_set_max_body_bytes(server, 0));
+    try std.testing.expectEqual(failed, core.sa_http_server_set_max_body_bytes(server, 2 * 1024 * 1024 * 1024));
+    try std.testing.expectEqual(@as(u32, 0), core.sa_http_server_set_max_body_bytes(server, 16));
 
     // Two accept attempts: the oversize one fails, the small one succeeds.
     const serve_thread = try std.Thread.spawn(.{}, serveN, .{ServeNArgs{ .server = server, .n = 2 }});

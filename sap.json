@@ -1,7 +1,7 @@
 {
   "schema": "sa.plugin/1",
   "name": "http-server",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "source": {
     "type": "local",
     "path": "."
@@ -15,20 +15,53 @@
       "path": "zig-out/lib/libhttp-server.so"
     }
   },
-  "interfaces": {
-    "sai": { "path": "sa_http_server.sai" }
-  },
-  "skills": ["http.server"],
+  "skills": [
+    "http.server"
+  ],
   "permissions": {
     "fs": [
-      { "op": "metadata", "path": "$SA_PLUGINS_HOME/**" }
+      {
+        "op": "metadata",
+        "path": "$SA_PLUGINS_HOME/**"
+      }
     ],
     "net": [
-      { "url": "http://localhost", "methods": ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
-      { "url": "http://127.0.0.1", "methods": ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] }
+      {
+        "url": "http://localhost",
+        "methods": [
+          "GET",
+          "POST",
+          "PUT",
+          "PATCH",
+          "DELETE",
+          "HEAD",
+          "OPTIONS"
+        ]
+      },
+      {
+        "url": "http://127.0.0.1",
+        "methods": [
+          "GET",
+          "POST",
+          "PUT",
+          "PATCH",
+          "DELETE",
+          "HEAD",
+          "OPTIONS"
+        ]
+      }
     ],
-    "env": ["HOME", "TMPDIR", "TMP", "TEMP", "SA_*"],
-    "process": { "spawn": false, "exec": [] }
+    "env": [
+      "HOME",
+      "TMPDIR",
+      "TMP",
+      "TEMP",
+      "SA_*"
+    ],
+    "process": {
+      "spawn": false,
+      "exec": []
+    }
   },
   "dependencies": {}
 }

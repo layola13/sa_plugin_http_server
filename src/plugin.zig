@@ -2,78 +2,10 @@ const std = @import("std");
 const plugin_api = @import("plugin_api");
 const plugin_helpers = @import("plugin_helpers.zig");
 const http_server_interface = @import("http_server_interface");
-const _http_api = @import("http_saasm_api.zig");
-// NOTE(Zig 0.17): `usingnamespace` was removed; explicit re-exports preserve plugin.* ABI.
-pub const HttpServer = _http_api.HttpServer;
-pub const HttpRequest = _http_api.HttpRequest;
-pub const HttpResponse = _http_api.HttpResponse;
-pub const HttpStreamResponse = _http_api.HttpStreamResponse;
-pub const WebSocketHandle = _http_api.WebSocketHandle;
-pub const NetworkStatus = _http_api.NetworkStatus;
-pub const PollEvent = _http_api.PollEvent;
-pub const max_v2_message_bytes = _http_api.max_v2_message_bytes;
-pub const SaHttpServerHandle = _http_api.SaHttpServerHandle;
-pub const SaHttpRequestHandle = _http_api.SaHttpRequestHandle;
-pub const SaHttpResponseHandle = _http_api.SaHttpResponseHandle;
-pub const SaHttpStreamResponseHandle = _http_api.SaHttpStreamResponseHandle;
-pub const sa_http_server_new = _http_api.sa_http_server_new;
-pub const sa_http_server_start = _http_api.sa_http_server_start;
-pub const sa_http_server_accept = _http_api.sa_http_server_accept;
-pub const sa_http_server_req_get_method = _http_api.sa_http_server_req_get_method;
-pub const sa_http_server_req_get_path = _http_api.sa_http_server_req_get_path;
-pub const sa_http_server_req_get_header = _http_api.sa_http_server_req_get_header;
-pub const sa_http_server_req_get_body = _http_api.sa_http_server_req_get_body;
-pub const sa_http_server_req_free = _http_api.sa_http_server_req_free;
-pub const sa_http_server_resp_new = _http_api.sa_http_server_resp_new;
-pub const sa_http_server_resp_send = _http_api.sa_http_server_resp_send;
-pub const sa_http_server_resp_set_content_type = _http_api.sa_http_server_resp_set_content_type;
-pub const sa_http_server_resp_free = _http_api.sa_http_server_resp_free;
-pub const sa_http_server_resp_stream_new = _http_api.sa_http_server_resp_stream_new;
-pub const sa_http_server_resp_stream_write = _http_api.sa_http_server_resp_stream_write;
-pub const sa_http_server_resp_stream_flush = _http_api.sa_http_server_resp_stream_flush;
-pub const sa_http_server_resp_stream_end = _http_api.sa_http_server_resp_stream_end;
-pub const sa_http_server_resp_stream_free = _http_api.sa_http_server_resp_stream_free;
-pub const sa_http_server_free = _http_api.sa_http_server_free;
-pub const sa_http_server_set_max_body_bytes = _http_api.sa_http_server_set_max_body_bytes;
-pub const sa_http_server_serve_threaded = _http_api.sa_http_server_serve_threaded;
-pub const sa_http_server_stop_serving = _http_api.sa_http_server_stop_serving;
-pub const sa_http_server_websocket_upgrade = _http_api.sa_http_server_websocket_upgrade;
-pub const sa_http_server_websocket_read = _http_api.sa_http_server_websocket_read;
-pub const sa_http_server_websocket_write = _http_api.sa_http_server_websocket_write;
-pub const sa_http_server_websocket_free = _http_api.sa_http_server_websocket_free;
-pub const sa_http_server_new_v2 = _http_api.sa_http_server_new_v2;
-pub const sa_http_server_start_v2 = _http_api.sa_http_server_start_v2;
-pub const sa_http_server_accept_v2 = _http_api.sa_http_server_accept_v2;
-pub const sa_http_server_req_free_v2 = _http_api.sa_http_server_req_free_v2;
-pub const sa_http_server_resp_new_v2 = _http_api.sa_http_server_resp_new_v2;
-pub const sa_http_server_resp_add_header_v2 = _http_api.sa_http_server_resp_add_header_v2;
-pub const sa_http_server_resp_send_v2 = _http_api.sa_http_server_resp_send_v2;
-pub const sa_http_server_resp_free_v2 = _http_api.sa_http_server_resp_free_v2;
-pub const sa_http_server_resp_stream_new_v2 = _http_api.sa_http_server_resp_stream_new_v2;
-pub const sa_http_server_resp_stream_add_header_v2 = _http_api.sa_http_server_resp_stream_add_header_v2;
-pub const sa_http_server_resp_stream_write_v2 = _http_api.sa_http_server_resp_stream_write_v2;
-pub const sa_http_server_resp_stream_flush_v2 = _http_api.sa_http_server_resp_stream_flush_v2;
-pub const sa_http_server_resp_stream_end_v2 = _http_api.sa_http_server_resp_stream_end_v2;
-pub const sa_http_server_resp_stream_free_v2 = _http_api.sa_http_server_resp_stream_free_v2;
-pub const sa_http_server_free_v2 = _http_api.sa_http_server_free_v2;
-pub const sa_http_server_websocket_upgrade_v2 = _http_api.sa_http_server_websocket_upgrade_v2;
-pub const sa_http_server_websocket_poll_v2 = _http_api.sa_http_server_websocket_poll_v2;
+// Framework plugin only: the HTTP/WebSocket core (sa_http_server_*) is built into
+// sa_std (sci/src/runtime/sa_http_server.zig); this plugin wraps it with CLI/framework
+// conveniences (scaffold + serve smoke server).
 
-// NOTE(Zig 0.17): `export` decls in imported files are dropped unless referenced;
-// force analysis so all @extern ABI symbols are emitted into the artifact.
-comptime {
-    for (std.meta.declarations(_http_api)) |d| {
-        const decl = @field(_http_api, d);
-        switch (@typeInfo(@TypeOf(decl))) {
-            .@"fn" => _ = &decl,
-            else => {},
-        }
-    }
-}
-pub const sa_http_server_websocket_read_v2 = _http_api.sa_http_server_websocket_read_v2;
-pub const sa_http_server_websocket_write_v2 = _http_api.sa_http_server_websocket_write_v2;
-pub const sa_http_server_websocket_close_v2 = _http_api.sa_http_server_websocket_close_v2;
-pub const sa_http_server_websocket_free_v2 = _http_api.sa_http_server_websocket_free_v2;
 
 pub const interface_source = http_server_interface.source;
 
